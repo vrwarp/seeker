@@ -88,7 +88,11 @@ class PromptConfig:
     """Prompt template and manuscript configuration."""
 
     template: str = "prompts/active.txt"
+    song_template: str = "prompts/v1.1_worship.txt"
     manuscript: str = ""
+    mode: str = "sermon"
+    anticipation_seconds: float = 1.0
+    arrangement_pdf: str = ""
 
 
 @dataclass

@@ -12,7 +12,7 @@ audio:
 
 gemini:
   api_key: "${GEMINI_API_KEY}"   # Set via environment variable
-  model: "models/gemini-2.5-flash-native-audio"
+  model: "models/gemini-2.5-flash-native-audio-latest"
   target_tokens: 100000
   reconnect_max_backoff_s: 8.0
 
@@ -38,4 +38,7 @@ logging:
 
 prompt:
   template: "prompts/v1.0_baseline.txt"
+  song_template: "prompts/v1.1_worship.txt"  # Prompt template for song/worship mode
   manuscript: ""                 # Path to manuscript file; set at runtime via CLI
+  mode: "sermon"                # "sermon" or "song"
+  anticipation_seconds: 1.0     # Predictive lead time for song mode (seconds)

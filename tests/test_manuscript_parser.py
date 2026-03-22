@@ -55,3 +55,64 @@ class TestManuscriptXml:
         xml = m.to_xml()
         assert "&lt;tag&gt;" in xml
         assert "&amp;" in xml
+
+
+class TestSlideBlockSectionLabel:
+    def test_default_empty(self):
+        block = SlideBlock(index=0, content="Hello")
+        assert block.section_label == ""
+
+    def test_set_value(self):
+        block = SlideBlock(index=0, content="Hello", section_label="Chorus")
+        assert block.section_label == "Chorus"
+
+
+class TestManuscriptXmlSectionLabel:
+    def test_xml_with_section_labels(self):
+        m = Manuscript(
+            blocks=[
+                SlideBlock(index=0, content="Verse lyrics", section_label="Verse 1"),
+                SlideBlock(index=1, content="Chorus lyrics", section_label="Chorus"),
+            ]
+        )
+        xml = m.to_xml(mode="song")
+        assert 'type="song"' in xml
+        assert 'section_label="Verse 1"' in xml
+        assert 'section_label="Chorus"' in xml
+
+    def test_xml_omits_empty_section_label(self):
+        m = Manuscript(blocks=[SlideBlock(index=0, content="Hello")])
+        xml = m.to_xml()
+        assert "section_label" not in xml
+
+    def test_xml_omits_type_when_no_mode(self):
+        m = Manuscript(blocks=[SlideBlock(index=0, content="Hello")])
+        xml = m.to_xml()
+        assert "type=" not in xml
+
+
+class TestFromSlideInfos:
+    def test_builds_from_slide_infos(self):
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeSlide:
+            index: int
+            text: str
+            group_name: str
+
+        slides = [
+            FakeSlide(index=0, text="Verse lyrics", group_name="Verse 1"),
+            FakeSlide(index=1, text="Chorus lyrics", group_name="Chorus"),
+        ]
+        m = Manuscript.from_slide_infos(slides, title="Test Song")
+        assert m.title == "Test Song"
+        assert len(m.blocks) == 2
+        assert m.blocks[0].content == "Verse lyrics"
+        assert m.blocks[0].section_label == "Verse 1"
+        assert m.blocks[1].section_label == "Chorus"
+
+    def test_empty_slides(self):
+        m = Manuscript.from_slide_infos([])
+        assert m.title == ""
+        assert len(m.blocks) == 0

@@ -14,6 +14,7 @@ class SlideBlock:
 
     index: int
     content: str
+    section_label: str = ""  # "Verse 1", "Chorus", "Bridge", etc.
 
 
 @dataclass
@@ -23,17 +24,28 @@ class Manuscript:
     title: str = ""
     blocks: list[SlideBlock] = field(default_factory=list)
 
-    def to_xml(self) -> str:
+    def to_xml(self, mode: str = "") -> str:
         """Serialize the manuscript to the XML format expected by the system prompt."""
-        lines = ["<presentation_manuscript>"]
+        type_attr = f' type="{mode}"' if mode else ""
+        lines = [f"<presentation_manuscript{type_attr}>"]
         for block in self.blocks:
-            lines.append(f'  <slide_block index="{block.index}">')
+            label_attr = f' section_label="{block.section_label}"' if block.section_label else ""
+            lines.append(f'  <slide_block index="{block.index}"{label_attr}>')
             lines.append("    <expected_content>")
             lines.append(f"      {escape(block.content.strip())}")
             lines.append("    </expected_content>")
             lines.append("  </slide_block>")
         lines.append("</presentation_manuscript>")
         return "\n".join(lines)
+
+    @classmethod
+    def from_slide_infos(cls, slides: list, title: str = "") -> "Manuscript":
+        """Build a Manuscript from a list of SlideInfo objects."""
+        blocks = [
+            SlideBlock(index=s.index, content=s.text, section_label=s.group_name)
+            for s in slides
+        ]
+        return cls(title=title, blocks=blocks)
 
 
 # ------------------------------------------------------------------

@@ -6,7 +6,7 @@ import os
 import textwrap
 from pathlib import Path
 
-from seeker.config import AudioConfig, load_config
+from seeker.config import AudioConfig, PromptConfig, load_config
 
 
 class TestAudioConfig:
@@ -68,3 +68,26 @@ class TestLoadConfig:
         config = load_config(config_file)
         # Should return defaults
         assert config.audio.sample_rate == 16000
+
+
+class TestPromptConfig:
+    def test_defaults(self):
+        config = PromptConfig()
+        assert config.mode == "sermon"
+        assert config.song_template == "prompts/v1.1_worship.txt"
+        assert config.anticipation_seconds == 1.0
+
+    def test_load_song_mode_yaml(self, tmp_path: Path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                prompt:
+                  mode: "song"
+                  song_template: "prompts/custom.txt"
+                  anticipation_seconds: 1.5
+            """)
+        )
+        config = load_config(config_file)
+        assert config.prompt.mode == "song"
+        assert config.prompt.song_template == "prompts/custom.txt"
+        assert config.prompt.anticipation_seconds == 1.5

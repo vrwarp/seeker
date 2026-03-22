@@ -83,12 +83,13 @@ class GeminiSession:
                                 "voiceName": "Puck"
                             }
                         }
-                    }
+                    },
                 },
                 "systemInstruction": {
                     "parts": [{"text": system_prompt}],
                 },
                 "tools": [{"functionDeclarations": tools}],
+                "inputAudioTranscription": {},
                 "realtimeInputConfig": {},
                 "contextWindowCompression": {
                     "slidingWindow": {
@@ -103,6 +104,7 @@ class GeminiSession:
 
         await self._ws.send(json.dumps(setup_payload))
         log.info("Setup payload sent (model=%s).", self.config.model)
+        log.debug("System prompt:\n%s", system_prompt)
 
         # Wait for setupComplete acknowledgment
         response = json.loads(await self._ws.recv())
@@ -144,9 +146,15 @@ class GeminiSession:
     async def receive_messages(self) -> None:
         """Listen for server messages and dispatch accordingly."""
         assert self._ws is not None
+        silence_seconds = 0
         while self._running:
             try:
-                raw = await self._ws.recv()
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
+                silence_seconds = 0
+            except asyncio.TimeoutError:
+                silence_seconds += 10
+                log.warning("No message from Gemini for %ds", silence_seconds)
+                continue
             except websockets.ConnectionClosed:
                 log.warning("WebSocket connection closed unexpectedly.")
                 await self._reconnect()
@@ -164,20 +172,25 @@ class GeminiSession:
                     self._resumption_handle = handle
                     log.debug("Session resumption handle updated.")
             elif "serverContent" in message:
-                # Text/Audio responses
-                content = message.get("serverContent", {})
+                content = message["serverContent"]
+                # Input transcription — what the model hears
+                if "inputTranscription" in content:
+                    text = content["inputTranscription"].get("text", "")
+                    if text.strip():
+                        log.info("Hearing: %s", text.strip())
+                # Model turn parts (text, thought, audio)
                 parts = content.get("modelTurn", {}).get("parts", [])
                 for part in parts:
                     if "text" in part:
-                        log.info("Gemini: %s", part["text"])
+                        log.debug("Gemini: %s", part["text"])
                     if "thought" in part:
-                        log.info("Gemini thought: %s", part["thought"])
+                        log.debug("Gemini thought: %s", part["thought"])
                     if "inlineData" in part:
                         log.debug("Gemini sent audio data content.")
             else:
                 # Log other message types briefly for visibility
                 keys = list(message.keys())
-                log.debug("Received message types: %s", keys)
+                log.info("Received message types: %s", keys)
 
     # ------------------------------------------------------------------
     # Tool call handling
