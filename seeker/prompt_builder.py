@@ -12,10 +12,7 @@ from seeker.manuscript_parser import Manuscript
 SLIDE_TOOL_DECLARATION: dict[str, Any] = {
     "name": "trigger_presentation_slide",
     "description": (
-        "Advance the live presentation to the next slide. Call this function "
-        "ONLY when the speaker has semantically completed the content of the "
-        "current slide block and is moving to the next topic. The next_slide_index "
-        "is the 0-based index of the target slide from the manuscript."
+        "Update the live presentation to the slide."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -23,13 +20,13 @@ SLIDE_TOOL_DECLARATION: dict[str, Any] = {
             "next_slide_index": {
                 "type": "INTEGER",
                 "description": (
-                    "The 0-based index of the next slide to display, "
-                    "corresponding to the slide_block index in the manuscript."
+                    "The 0-based index of the next slide to display."
                 ),
             }
         },
         "required": ["next_slide_index"],
     },
+    "behavior": "NON_BLOCKING",
 }
 
 SONG_SLIDE_TOOL_DECLARATION: dict[str, Any] = {

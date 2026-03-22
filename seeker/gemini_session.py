@@ -39,14 +39,19 @@ class GeminiSession:
         config: GeminiConfig,
         audio_queue: asyncio.Queue[bytes],
         tool_handler: ToolHandler,
+        audio_config: Any = None,
     ) -> None:
         self.config = config
         self.audio_queue = audio_queue
         self.tool_handler = tool_handler
+        self.audio_config = audio_config
 
         self._ws: ClientConnection | None = None
         self._resumption_handle: str | None = None
         self._running = False
+        
+        self._playback_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._playback_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -57,6 +62,10 @@ class GeminiSession:
         url = f"{self.config.endpoint}?key={self.config.api_key}"
         self._ws = await websockets.connect(url)
         self._running = True
+        
+        if self.config.play_audio_response and self._playback_task is None:
+            self._playback_task = asyncio.create_task(self._playback_loop())
+
         log.info("Gemini WebSocket connected.")
 
     async def disconnect(self) -> None:
@@ -65,6 +74,9 @@ class GeminiSession:
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
+        if self._playback_task is not None:
+            self._playback_task.cancel()
+            self._playback_task = None
         log.info("Gemini WebSocket disconnected.")
 
     async def send_setup(self, system_prompt: str, tools: list[dict]) -> None:
@@ -90,7 +102,12 @@ class GeminiSession:
                 },
                 "tools": [{"functionDeclarations": tools}],
                 "inputAudioTranscription": {},
-                "realtimeInputConfig": {},
+                "realtimeInputConfig": {
+                    "automaticActivityDetection": {
+                        "silenceDurationMs": 50,
+                        "disabled": False,
+                    }
+                },
                 "contextWindowCompression": {
                     "slidingWindow": {
                         "targetTokens": self.config.target_tokens,
@@ -189,6 +206,9 @@ class GeminiSession:
                         log.debug("Gemini thought: %s", part["thought"])
                     if "inlineData" in part:
                         log.debug("Gemini sent audio data content.")
+                        if self.config.play_audio_response:
+                            raw = base64.b64decode(part["inlineData"]["data"])
+                            self._playback_queue.put_nowait(raw)
             else:
                 # Log other message types briefly for visibility
                 keys = list(message.keys())
@@ -223,6 +243,7 @@ class GeminiSession:
                         "id": call_id,
                         "name": name,
                         "response": result,
+                        "scheduling": "SILENT",
                     }
                 ]
             }
@@ -256,3 +277,32 @@ class GeminiSession:
                 log.warning("Reconnect attempt %d failed: %s. Retrying in %.1fs", attempt + 1, exc, delay)
                 await asyncio.sleep(delay)
                 attempt += 1
+
+    # ------------------------------------------------------------------
+    # Audio Playback
+    # ------------------------------------------------------------------
+
+    async def _playback_loop(self) -> None:
+        """Background task to play Gemini's response audio synchronously via a thread."""
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        # Gemini 2.x returns 24kHz PCM by default
+        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
+        try:
+            while self._running:
+                chunk = await self._playback_queue.get()
+                if self.audio_config is not None:
+                    self.audio_config.is_gemini_speaking = True
+
+                await asyncio.to_thread(stream.write, chunk)
+
+                if self._playback_queue.empty() and self.audio_config is not None:
+                    self.audio_config.is_gemini_speaking = False
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.error("Playback error: %r", e)
+        finally:
+            stream.stop_stream()
+            stream.close()
+            pa.terminate()

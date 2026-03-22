@@ -41,6 +41,12 @@ class FileAudioCapture:
         cmd = [
             "ffmpeg",
             "-i", str(file_path),
+        ]
+        
+        if self.config.play_speed != 1.0:
+            cmd.extend(["-af", f"atempo={self.config.play_speed}"])
+            
+        cmd.extend([
             "-f", "s16le",
             "-acodec", "pcm_s16le",
             "-ar", str(self.config.sample_rate),
@@ -48,7 +54,7 @@ class FileAudioCapture:
             "-vn",
             "-loglevel", "quiet",
             "pipe:1"
-        ]
+        ])
 
         log.info("Starting file ingestion: %s", file_path)
         self._process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -124,7 +130,12 @@ class FileAudioCapture:
             # Simulate real-time pacing
             if self._out_stream:
                 try:
-                    self._out_stream.write(data)
+                    out_data = data
+                    if getattr(self.config, 'is_gemini_speaking', False):
+                        import audioop
+                        out_data = audioop.mul(data, 2, 0.1)  # 10% volume
+
+                    self._out_stream.write(out_data)
                 except Exception as e:
                     log.error("Audio playback error: %s", e)
             else:

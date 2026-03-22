@@ -22,6 +22,8 @@ class AudioConfig:
     input_gain_db: float = 0.0
     audio_file: str | None = None
     play_audio: bool = False
+    is_gemini_speaking: bool = False
+    play_speed: float = 1.0
 
     @property
     def chunk_frames(self) -> int:
@@ -46,6 +48,7 @@ class GeminiConfig:
     )
     target_tokens: int = 100_000
     reconnect_max_backoff_s: float = 8.0
+    play_audio_response: bool = False
 
 
 @dataclass

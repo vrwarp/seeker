@@ -289,7 +289,7 @@ class SeekerDaemon:
         self._audio_queue = asyncio.Queue(maxsize=self.config.audio.queue_max_size)
         tool_handler = ProPresenterToolHandler(self._pp_client, presentation_uuid)
         self._gemini_session = GeminiSession(
-            self.config.gemini, self._audio_queue, tool_handler
+            self.config.gemini, self._audio_queue, tool_handler, self.config.audio
         )
 
         # Connect to Gemini
