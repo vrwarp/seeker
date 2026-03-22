@@ -21,6 +21,7 @@ class AudioConfig:
     queue_max_size: int = 100
     input_gain_db: float = 0.0
     audio_file: str | None = None
+    play_audio: bool = False
 
     @property
     def chunk_frames(self) -> int:

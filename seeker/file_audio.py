@@ -23,6 +23,8 @@ class FileAudioCapture:
         self.queue = queue
         self._process: subprocess.Popen | None = None
         self._running = False
+        self._pa = None
+        self._out_stream = None
 
     async def start(self) -> None:
         """Launch ffmpeg and start the ingestion loop."""
@@ -51,6 +53,18 @@ class FileAudioCapture:
         log.info("Starting file ingestion: %s", file_path)
         self._process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._running = True
+        
+        if self.config.play_audio:
+            import pyaudio
+            self._pa = pyaudio.PyAudio()
+            self._out_stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=self.config.channels,
+                rate=self.config.sample_rate,
+                output=True,
+            )
+            log.info("Audio playback enabled for file ingestion")
+
         self._loop = asyncio.get_running_loop()
 
         # Run the ingestion loop in a separate thread to avoid blocking
@@ -71,6 +85,15 @@ class FileAudioCapture:
         if self._process:
             self._process.terminate()
             self._process = None
+            
+        if self._out_stream:
+            self._out_stream.stop_stream()
+            self._out_stream.close()
+            self._out_stream = None
+        if self._pa:
+            self._pa.terminate()
+            self._pa = None
+            
         log.info("File ingestion stopped.")
 
     def _ingestion_loop(self) -> None:
@@ -99,8 +122,14 @@ class FileAudioCapture:
                 log.error("Failed to push audio chunk to queue: %s", e)
 
             # Simulate real-time pacing
-            import time
-            time.sleep(pacing_s)
+            if self._out_stream:
+                try:
+                    self._out_stream.write(data)
+                except Exception as e:
+                    log.error("Audio playback error: %s", e)
+            else:
+                import time
+                time.sleep(pacing_s)
 
         self._running = False
 

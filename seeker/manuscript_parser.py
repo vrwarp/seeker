@@ -98,6 +98,25 @@ def parse_structured(data: dict) -> Manuscript:
     return Manuscript(title=title, blocks=blocks)
 
 
+def parse_xml(text: str) -> Manuscript:
+    """Parse an already XML-formatted manuscript."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return parse_plain_text(text)
+
+    blocks = []
+    for slide in root.findall("slide_block"):
+        index = int(slide.get("index", "0"))
+        section_label = slide.get("section_label", "")
+        expected = slide.find("expected_content")
+        content = expected.text.strip() if expected is not None and expected.text else ""
+        blocks.append(SlideBlock(index=index, content=content, section_label=section_label))
+    return Manuscript(blocks=blocks)
+
+
 def load_manuscript(path: str | Path) -> Manuscript:
     """Auto-detect format and load a manuscript from *path*."""
     path = Path(path)
@@ -121,6 +140,8 @@ def load_manuscript(path: str | Path) -> Manuscript:
         return parse_structured(data)
     if suffix == ".md":
         return parse_markdown(text)
+    if suffix == ".xml":
+        return parse_xml(text)
 
     # Default: plain text
     return parse_plain_text(text)

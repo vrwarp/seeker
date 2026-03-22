@@ -51,6 +51,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         config.prompt.manuscript = args.manuscript
     if args.audio_file:
         config.audio.audio_file = args.audio_file
+    if args.play_audio:
+        config.audio.play_audio = args.play_audio
     if args.mode:
         config.prompt.mode = args.mode
     if args.anticipation is not None:
@@ -166,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_start = sub.add_parser("start", help="Start the daemon")
     sp_start.add_argument("--manuscript", "-m", help="Path to sermon manuscript file")
     sp_start.add_argument("--audio-file", "-f", help="Path to an audio file (e.g. mp3) to ingest instead of live audio")
+    sp_start.add_argument("--play-audio", action="store_true", help="Simultaneously play the ingested audio file through the speaker")
     sp_start.add_argument("--auto-activate", action="store_true", help="Auto-activate when PP sermon detected")
     sp_start.add_argument("--mode", choices=["sermon", "song"], default="sermon", help="Tracking mode")
     sp_start.add_argument("--anticipation", type=float, default=None, help="Predictive lead time in seconds for song mode")

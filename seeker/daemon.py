@@ -210,10 +210,26 @@ class SeekerDaemon:
         self._http_session = aiohttp.ClientSession()
         self._pp_client = ProPresenterClient(self.config.propresenter, self._http_session)
 
+        # ProPresenter pre-flight check
+        log.info("Running ProPresenter pre-flight check...")
+        pres = await self._pp_client.get_active_presentation()
+        if pres:
+            test_indices = [0, 1, 0]
+            test_indices = [i for i in test_indices if i < pres.slide_count]
+            if test_indices:
+                log.info("Testing ProPresenter connection by triggering slides: %s", test_indices)
+                for idx in test_indices:
+                    success = await self._pp_client.trigger_index(pres.uuid, idx)
+                    if not success:
+                        log.error("Failed to trigger slide %d during pre-flight check.", idx)
+                        break
+                    await asyncio.sleep(0.5)
+        else:
+            log.warning("ProPresenter pre-flight check failed: no active presentation found.")
+
         if mode == "song":
             # In song mode, fetch lyrics from ProPresenter
             slides = await self._pp_client.get_presentation_slides()
-            pres = await self._pp_client.get_active_presentation()
             manuscript = Manuscript.from_slide_infos(
                 slides, title=pres.name if pres else ""
             )
@@ -250,7 +266,7 @@ class SeekerDaemon:
         else:
             # Sermon mode: load manuscript from file
             song_arrangement = ""
-            presentation_uuid = ""
+            presentation_uuid = pres.uuid if pres else ""
             if not manuscript_path:
                 raise ValueError("Manuscript path required for sermon mode")
             log.info("Activating with manuscript: %s", manuscript_path)

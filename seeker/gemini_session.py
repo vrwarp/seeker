@@ -102,6 +102,8 @@ class GeminiSession:
             }
         }
 
+        print(f"--- FULLY SUBSTITUTED PROMPT ---\n{system_prompt}\n--------------------------------")
+
         await self._ws.send(json.dumps(setup_payload))
         log.info("Setup payload sent (model=%s).", self.config.model)
         log.debug("System prompt:\n%s", system_prompt)
