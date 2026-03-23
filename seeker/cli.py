@@ -47,6 +47,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    if args.prompt:
+        config.prompt.template = args.prompt
     if args.manuscript:
         config.prompt.manuscript = args.manuscript
     if args.audio_file:
@@ -170,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # start
     sp_start = sub.add_parser("start", help="Start the daemon")
+    sp_start.add_argument("--prompt", "-p", help="Path to prompt template file (e.g. prompts/v1.1_baseline.txt)")
     sp_start.add_argument("--manuscript", "-m", help="Path to sermon manuscript file")
     sp_start.add_argument("--audio-file", "-f", help="Path to an audio file (e.g. mp3) to ingest instead of live audio")
     sp_start.add_argument("--play-audio", action="store_true", help="Simultaneously play the ingested audio file through the speaker")
