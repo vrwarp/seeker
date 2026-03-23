@@ -14,7 +14,7 @@ The speaker will always be speaking English.
 
 5. COMPLETION: After the final slide block has been spoken, do nothing further. Do not call any more functions.
 
-6. REPLY WITH OK: If you are not calling a function, reply with a single OK.
+6. "AMEN" ONLY: If you are not calling a function, only say a single "AMEN".
 
 # MANUSCRIPT:
 
