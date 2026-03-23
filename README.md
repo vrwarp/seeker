@@ -85,6 +85,15 @@ seeker start --manuscript sermon.txt
 
 ---
 
+## Example Commands
+
+```bash
+# Start the daemon with an audio track, an xml manuscript following the v1.1 baseline, and the v1.1 baseline prompt
+seeker --verbose start --audio-file example.mp3 --manuscript sermon.xml --prompt prompts/v1.1_baseline.txt --play-audio --speed 1.0
+```
+
+---
+
 ## Technology Stack
 
 | Layer | Technology | Rationale |
