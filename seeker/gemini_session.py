@@ -52,6 +52,9 @@ class GeminiSession:
         
         self._playback_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._playback_task: asyncio.Task | None = None
+        
+        self._system_prompt = ""
+        self._tools: list[dict] = []
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -68,20 +71,27 @@ class GeminiSession:
 
         log.info("Gemini WebSocket connected.")
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, reconnecting: bool = False) -> None:
         """Gracefully close the WebSocket."""
-        self._running = False
+        if not reconnecting:
+            self._running = False
+            if self._playback_task is not None:
+                self._playback_task.cancel()
+                self._playback_task = None
+
         if self._ws is not None:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
             self._ws = None
-        if self._playback_task is not None:
-            self._playback_task.cancel()
-            self._playback_task = None
         log.info("Gemini WebSocket disconnected.")
 
     async def send_setup(self, system_prompt: str, tools: list[dict]) -> None:
         """Transmit the BidiGenerateContentSetup payload."""
         assert self._ws is not None
+        self._system_prompt = system_prompt
+        self._tools = tools
 
         setup_payload: dict[str, Any] = {
             "setup": {
@@ -138,11 +148,13 @@ class GeminiSession:
 
     async def stream_audio(self) -> None:
         """Continuously read from the audio queue and send to Gemini."""
-        assert self._ws is not None
         while self._running:
             try:
                 pcm_bytes = await asyncio.wait_for(self.audio_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
+                continue
+
+            if self._ws is None:
                 continue
 
             encoded = base64.b64encode(pcm_bytes).decode("ascii")
@@ -156,7 +168,10 @@ class GeminiSession:
                     ]
                 }
             }
-            await self._ws.send(json.dumps(message))
+            try:
+                await self._ws.send(json.dumps(message))
+            except websockets.exceptions.ConnectionClosed:
+                log.debug("WebSocket closed during audio broadcast.")
 
     # ------------------------------------------------------------------
     # Message reception (ingress)
@@ -164,9 +179,12 @@ class GeminiSession:
 
     async def receive_messages(self) -> None:
         """Listen for server messages and dispatch accordingly."""
-        assert self._ws is not None
         silence_seconds = 0
         while self._running:
+            if self._ws is None:
+                await asyncio.sleep(0.5)
+                continue
+
             try:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
                 silence_seconds = 0
@@ -177,7 +195,7 @@ class GeminiSession:
             except websockets.ConnectionClosed:
                 log.warning("WebSocket connection closed unexpectedly.")
                 await self._reconnect()
-                return
+                continue
 
             message = json.loads(raw)
 
@@ -248,8 +266,12 @@ class GeminiSession:
                 ]
             }
         }
-        await self._ws.send(json.dumps(response))
-        log.debug("Tool response sent for id=%s", call_id)
+        if self._ws is not None:
+            try:
+                await self._ws.send(json.dumps(response))
+                log.debug("Tool response sent for id=%s", call_id)
+            except websockets.exceptions.ConnectionClosed:
+                log.warning("Cannot send tool response: WebSocket closed.")
 
     # ------------------------------------------------------------------
     # GoAway / reconnection
@@ -262,14 +284,18 @@ class GeminiSession:
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff, preserving the session handle."""
-        await self.disconnect()
+        await self.disconnect(reconnecting=True)
         attempt = 0
         while True:
             try:
                 await self.connect()
                 log.info("Reconnected (attempt %d) with session resumption.", attempt + 1)
+                
+                if self._system_prompt:
+                    await self.send_setup(self._system_prompt, self._tools)
+                    
                 return
-            except (ConnectionError, TimeoutError, OSError) as exc:
+            except Exception as exc:
                 delay = min(
                     2**attempt + random.uniform(0, 1),
                     self.config.reconnect_max_backoff_s,
