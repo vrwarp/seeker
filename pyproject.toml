@@ -24,6 +24,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.7",
 ]
+# Optional: PDF song-arrangement extraction (song mode). Kept optional because
+# PyMuPDF is AGPL-licensed; install with `pip install -e ".[pdf]"` if needed.
+pdf = [
+    "pymupdf>=1.24",
+]
 
 [project.scripts]
 seeker = "seeker.cli:main"

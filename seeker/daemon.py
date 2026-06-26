@@ -19,6 +19,7 @@ from seeker.gemini_session import GeminiSession
 from seeker.manuscript_parser import Manuscript, load_manuscript
 from seeker.prompt_builder import build_system_prompt, get_tool_declaration, load_prompt_template
 from seeker.propresenter_client import ProPresenterClient, ProPresenterToolHandler
+from seeker.tracking import TrackingState
 
 log = logging.getLogger(__name__)
 
@@ -183,12 +184,23 @@ class SeekerDaemon:
         self._pp_client: ProPresenterClient | None = None
         self._task_group_tasks: list[asyncio.Task[Any]] = []
 
+        # Shared slide-tracking state (single source of truth for current/commanded slide)
+        self._tracking = TrackingState()
+
         # Metrics
-        self.current_slide_index = 0
-        self.total_slides = 0
         self.session_start: float | None = None
         self.trigger_latencies: list[float] = []
         self.error_count = 0
+        self.override_count = 0
+
+    @property
+    def current_slide_index(self) -> int:
+        """The slide currently believed to be on screen (observed when possible)."""
+        return self._tracking.current_index
+
+    @property
+    def total_slides(self) -> int:
+        return self._tracking.total_slides
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -210,14 +222,19 @@ class SeekerDaemon:
         self._http_session = aiohttp.ClientSession()
         self._pp_client = ProPresenterClient(self.config.propresenter, self._http_session)
 
-        # ProPresenter pre-flight check
+        # ProPresenter pre-flight check (read-only by default — never moves the
+        # live deck unless the operator explicitly opts in, so activating mid-service
+        # cannot cause a visible slide jump).
         log.info("Running ProPresenter pre-flight check...")
         pres = await self._pp_client.get_active_presentation()
-        if pres:
-            test_indices = [0, 1, 0]
-            test_indices = [i for i in test_indices if i < pres.slide_count]
+        if not pres:
+            log.warning("ProPresenter pre-flight check failed: no active presentation found.")
+        elif self.config.propresenter.preflight_trigger_test:
+            test_indices = [i for i in (0, 1, 0) if i < pres.slide_count]
             if test_indices:
-                log.info("Testing ProPresenter connection by triggering slides: %s", test_indices)
+                log.warning(
+                    "Pre-flight TRIGGER test enabled — moving live slides: %s", test_indices
+                )
                 for idx in test_indices:
                     success = await self._pp_client.trigger_index(pres.uuid, idx)
                     if not success:
@@ -225,7 +242,12 @@ class SeekerDaemon:
                         break
                     await asyncio.sleep(0.5)
         else:
-            log.warning("ProPresenter pre-flight check failed: no active presentation found.")
+            log.info(
+                "Pre-flight OK: '%s' (%d slides). Trigger test skipped "
+                "(set propresenter.preflight_trigger_test: true to enable).",
+                pres.name,
+                pres.slide_count,
+            )
 
         if mode == "song":
             # In song mode, fetch lyrics from ProPresenter
@@ -274,7 +296,19 @@ class SeekerDaemon:
             template = load_prompt_template(self.config.prompt.template)
             tool_decl = get_tool_declaration("sermon")
 
-        self.total_slides = len(manuscript.blocks)
+        # Seed shared tracking state. Non-linear jumps (chorus returns, out-of-order
+        # scripture) are legitimate in song mode and v1.1 dual-mode manuscripts, so
+        # the locality guard is only enforced for plain sequential sermon tracking.
+        allow_nonlinear = (mode == "song") or (manuscript.version == "1.1")
+        max_jump = self.config.propresenter.max_slide_jump or None
+        self._tracking = TrackingState(total_slides=len(manuscript.blocks))
+        try:
+            observed = await self._pp_client.get_current_slide_index()
+            if observed is not None:
+                self._tracking.current_index = observed
+        except Exception:  # noqa: BLE001 - pre-flight is best-effort
+            pass
+
         system_prompt = build_system_prompt(
             template,
             manuscript,
@@ -287,7 +321,14 @@ class SeekerDaemon:
 
         # Create subsystems
         self._audio_queue = asyncio.Queue(maxsize=self.config.audio.queue_max_size)
-        tool_handler = ProPresenterToolHandler(self._pp_client, presentation_uuid)
+        tool_handler = ProPresenterToolHandler(
+            self._pp_client,
+            presentation_uuid,
+            state=self._tracking,
+            max_jump=max_jump,
+            allow_nonlinear=allow_nonlinear,
+            auto_yield_cooldown_s=self.config.propresenter.auto_yield_cooldown_s,
+        )
         self._gemini_session = GeminiSession(
             self.config.gemini, self._audio_queue, tool_handler, self.config.audio
         )
@@ -311,6 +352,7 @@ class SeekerDaemon:
             asyncio.create_task(audio_task_coro),
             asyncio.create_task(self._gemini_session.stream_audio()),
             asyncio.create_task(self._gemini_session.receive_messages()),
+            asyncio.create_task(self._reconcile_loop()),
         ]
         try:
             await asyncio.gather(*tasks)
@@ -320,6 +362,66 @@ class SeekerDaemon:
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await self.deactivate()
+
+    async def _reconcile_loop(self) -> None:
+        """Closed-loop drift detection and operator auto-yield.
+
+        Periodically reads the slide that is *actually* on screen and reconciles it
+        against what the agent commanded:
+
+          * If the observed slide matches the last agent command, it's just the
+            agent's own change being reflected — adopt it as the known position.
+          * If the observed slide changed to something the agent did *not* command,
+            a human operator moved it. Flag an override, re-anchor to where the
+            operator went, and (via ``auto_yield_cooldown_s``) suppress agent
+            triggers for a short window so Seeker yields instead of fighting them.
+
+        This is what turns the previously fire-and-forget trigger into a self-correcting
+        loop. It is best-effort: ProPresenter read failures are tolerated (the slide
+        status endpoint can be unavailable or return nothing), and the loop exits on
+        cancellation when the session ends.
+        """
+        state = self._tracking
+        interval = self.config.propresenter.drift_poll_interval_s
+        cooldown = self.config.propresenter.auto_yield_cooldown_s
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if self._pp_client is None:
+                    continue
+                observed = await self._pp_client.get_current_slide_index()
+                now = time.monotonic()
+
+                # Clear a stale override once the operator has settled.
+                if (
+                    state.operator_override
+                    and state.override_at is not None
+                    and (now - state.override_at) >= cooldown
+                ):
+                    state.operator_override = False
+                    log.info("Auto-yield cooldown elapsed — resuming automatic advance.")
+
+                if observed is None or observed == state.current_index:
+                    continue
+
+                if observed == state.commanded_index:
+                    # The agent's own slide change, now confirmed on screen.
+                    state.current_index = observed
+                else:
+                    # A human moved the slide. Yield and re-anchor.
+                    log.warning(
+                        "Operator override detected: on-screen slide %d but agent last "
+                        "commanded %d. Yielding for %.1fs and re-anchoring.",
+                        observed,
+                        state.commanded_index,
+                        cooldown,
+                    )
+                    state.operator_override = True
+                    state.override_at = now
+                    state.current_index = observed
+                    self.override_count += 1
+        except asyncio.CancelledError:
+            return
 
     async def deactivate(self) -> None:
         """Gracefully stop streaming and return to DORMANT."""
@@ -359,8 +461,11 @@ class SeekerDaemon:
 
         return {
             "state": self.state.value,
-            "current_slide_index": self.current_slide_index,
-            "total_slides": self.total_slides,
+            "current_slide_index": self._tracking.current_index,
+            "commanded_slide_index": self._tracking.commanded_index,
+            "total_slides": self._tracking.total_slides,
+            "operator_override": self._tracking.operator_override,
+            "override_count": self.override_count,
             "session_duration_s": round(duration, 1),
             "gemini_connected": self._gemini_session is not None and self._gemini_session._running,
             "propresenter_connected": self._pp_client is not None,

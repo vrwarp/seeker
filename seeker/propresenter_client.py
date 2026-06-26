@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
 
 from seeker.config import ProPresenterConfig
+from seeker.tracking import TrackingState, evaluate_trigger
 
 log = logging.getLogger(__name__)
 
@@ -111,8 +114,9 @@ class ProPresenterClient:
     async def _get_ok(self, path: str) -> bool:
         """Issue a GET request and return True if response is 2xx."""
         url = f"{self.base_url}{path}"
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout_s)
         try:
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=self.config.timeout_s)) as resp:
+            async with self._session.get(url, timeout=timeout) as resp:
                 ok = resp.ok
                 if not ok:
                     log.warning("ProPresenter %s returned %d", path, resp.status)
@@ -124,8 +128,9 @@ class ProPresenterClient:
     async def _get_json(self, path: str) -> dict[str, Any] | None:
         """Issue a GET request and return JSON body, or None on failure."""
         url = f"{self.base_url}{path}"
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout_s)
         try:
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=self.config.timeout_s)) as resp:
+            async with self._session.get(url, timeout=timeout) as resp:
                 if resp.ok:
                     return await resp.json()
                 log.warning("ProPresenter %s returned %d", path, resp.status)
@@ -139,11 +144,35 @@ class ProPresenterToolHandler:
     """Bridges Gemini tool calls to ProPresenter REST commands.
 
     Implements the ``ToolHandler`` protocol expected by ``GeminiSession``.
+
+    When a :class:`~seeker.tracking.TrackingState` is supplied, every proposed
+    trigger is run through :func:`~seeker.tracking.evaluate_trigger` first, so a
+    hallucinated out-of-range index, a redundant re-fire, or a trigger that would
+    fight a human operator is rejected before it ever reaches ProPresenter. On a
+    successful trigger the handler records what it commanded so the reconcile loop
+    can distinguish agent-driven slide changes from manual operator overrides.
+
+    With no ``state`` it behaves exactly as before (unconstrained fire-and-forget).
     """
 
-    def __init__(self, client: ProPresenterClient, presentation_uuid: str = "") -> None:
+    def __init__(
+        self,
+        client: ProPresenterClient,
+        presentation_uuid: str = "",
+        *,
+        state: TrackingState | None = None,
+        max_jump: int | None = None,
+        allow_nonlinear: bool = True,
+        auto_yield_cooldown_s: float = 0.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.client = client
         self.presentation_uuid = presentation_uuid
+        self.state = state
+        self.max_jump = max_jump
+        self.allow_nonlinear = allow_nonlinear
+        self.auto_yield_cooldown_s = auto_yield_cooldown_s
+        self._clock = clock
 
     async def handle(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         if name != "trigger_presentation_slide":
@@ -157,9 +186,35 @@ class ProPresenterToolHandler:
         else:
             log.info("Triggering slide → index %d", slide_index)
 
+        if self.state is not None:
+            decision = evaluate_trigger(
+                self.state,
+                slide_index,
+                max_jump=self.max_jump,
+                allow_nonlinear=self.allow_nonlinear,
+                auto_yield_cooldown_s=self.auto_yield_cooldown_s,
+                now=self._clock(),
+            )
+            if not decision.allow:
+                log.warning(
+                    "Slide trigger rejected (index=%d, current=%d): %s",
+                    slide_index,
+                    self.state.current_index,
+                    decision.reason,
+                )
+                return {"ok": False, "reason": decision.reason}
+
         if self.presentation_uuid:
             success = await self.client.trigger_index(self.presentation_uuid, slide_index)
         else:
             success = await self.client.trigger_next()
+
+        if success and self.state is not None:
+            # Record the command so the reconcile loop attributes this slide change
+            # to the agent (not a human), and optimistically advance the known
+            # position; the reconcile loop confirms it against the real screen.
+            self.state.commanded_index = slide_index
+            self.state.commanded_at = self._clock()
+            self.state.current_index = slide_index
 
         return {"ok": success}
