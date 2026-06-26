@@ -184,6 +184,12 @@ See the [plan/](plan/) directory for the full technical design:
 
 ---
 
+## Research
+
+- [State of the Art for a Live-Audio Slide-Driving Agent](docs/research/state-of-the-art-slide-agent.md) — survey of alternative real-time/audio models (OpenAI gpt-realtime, Amazon Nova Sonic, open/self-hostable options), semantic-alignment techniques, voice-agent frameworks, prior art, and presentation-control/drift strategies, with prioritized next experiments for Seeker.
+
+---
+
 ## License
 
 MIT
