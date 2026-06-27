@@ -187,6 +187,8 @@ See the [plan/](plan/) directory for the full technical design:
 ## Research
 
 - [State of the Art for a Live-Audio Slide-Driving Agent](docs/research/state-of-the-art-slide-agent.md) — survey of alternative real-time/audio models (OpenAI gpt-realtime, Amazon Nova Sonic, open/self-hostable options), semantic-alignment techniques, voice-agent frameworks, prior art, and presentation-control/drift strategies, with prioritized next experiments for Seeker.
+- [Is Full-Duplex Worth It for Seeker?](docs/research/full-duplex-suitability.md) — suitability analysis of full-duplex speech models for a mostly-silent, tool-firing agent: the half-duplex vs full-duplex distinction, the tool-calling gap, a candidate-model table, and when the verdict would flip.
+- [Frontier Design Briefing: Making "Duplex" Actually Work](docs/research/duplex-frontier-design.md) — generative design study of architectures for continuous-listen + sparse silent structured firing (action-channel, frozen-head, per-frame posterior, cascade-as-duplex), with ranked proposals, a staged build plan, and the highest-upside frontier bet.
 
 ---
 
