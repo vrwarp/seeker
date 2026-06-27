@@ -41,7 +41,14 @@ class GeminiConfig:
     """Gemini Multimodal Live API configuration."""
 
     api_key: str = ""
-    model: str = "models/gemini-2.5-flash-native-audio-latest"
+    # Stable alias for the 2.5 native-audio Live model. The dated preview
+    # `...native-audio-09-2025` was removed 2026-03-19; pin to the stable alias
+    # (not a dated snapshot) to avoid mid-deployment breakage. Verify against the
+    # current Gemini model list before deploying. NOTE: 2.5 native-audio is the
+    # only Gemini tier that supports NON_BLOCKING/SILENT async tool calls, which
+    # Seeker relies on — do not "upgrade" to 3.1 Flash Live without confirming
+    # its synchronous tool calls don't stall the fire-and-forget trigger.
+    model: str = "models/gemini-live-2.5-flash-native-audio"
     endpoint: str = (
         "wss://generativelanguage.googleapis.com/ws/"
         "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
@@ -63,6 +70,15 @@ class ProPresenterConfig:
     health_check_interval_s: float = 30.0
     ws_password: str = ""
     sermon_uuid: str = ""
+    # Closed-loop / safety controls
+    # If True, the pre-flight check fires test slides — VISIBLE on the live deck.
+    preflight_trigger_test: bool = False
+    # How often the reconcile loop reads the actual on-screen slide (seconds).
+    drift_poll_interval_s: float = 2.0
+    # After a human override, suppress agent triggers for this long (seconds).
+    auto_yield_cooldown_s: float = 5.0
+    # Max slides the agent may jump per trigger (0 = unlimited; sequential modes only).
+    max_slide_jump: int = 0
 
     @property
     def base_url(self) -> str:
@@ -91,7 +107,7 @@ class LoggingConfig:
 class PromptConfig:
     """Prompt template and manuscript configuration."""
 
-    template: str = "prompts/active.txt"
+    template: str = "prompts/v1.0_baseline.txt"
     song_template: str = "prompts/v1.1_worship.txt"
     manuscript: str = ""
     mode: str = "sermon"

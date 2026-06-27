@@ -12,7 +12,9 @@ audio:
 
 gemini:
   api_key: "${GEMINI_API_KEY}"   # Set via environment variable
-  model: "models/gemini-2.5-flash-native-audio-latest"
+  # Stable alias for the 2.5 native-audio Live model (the dated 09-2025 preview
+  # was removed 2026-03-19). Verify against the current Gemini model list.
+  model: "models/gemini-live-2.5-flash-native-audio"
   target_tokens: 100000
   reconnect_max_backoff_s: 8.0
 
@@ -25,6 +27,11 @@ propresenter:
   health_check_interval_s: 30
   ws_password: ""
   sermon_uuid: ""                # UUID of the sermon presentation for auto-activation
+  # Closed-loop / safety controls
+  preflight_trigger_test: false  # if true, the pre-flight check moves real slides on the live deck
+  drift_poll_interval_s: 2.0     # how often to read the actual on-screen slide for drift/override detection
+  auto_yield_cooldown_s: 5.0     # after a human moves a slide, pause automatic advance for this long
+  max_slide_jump: 0              # cap how far the agent may jump per trigger (0 = unlimited; sequential sermons only)
 
 operator:
   http_port: 8080
@@ -42,3 +49,4 @@ prompt:
   manuscript: ""                 # Path to manuscript file; set at runtime via CLI
   mode: "sermon"                # "sermon" or "song"
   anticipation_seconds: 1.0     # Predictive lead time for song mode (seconds)
+  arrangement_pdf: ""           # Optional .txt or .pdf song arrangement (PDF requires the `pdf` extra)
