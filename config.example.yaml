@@ -44,6 +44,9 @@ openai:
   session_rotate_s: 3000         # rotate ahead of the hard 60-min session cap
   tracker_autofire: true         # song mode: fire unambiguous verbatim lyric matches
   tracker_autofire_confidence: 0.9
+  tracker_autofire_margin: 0.08  # required score gap over rival hypotheses (repeat vs
+                                 # next vs jump); near-ties defer to the model's ears
+  hint_cooldown_s: 4.0           # min spacing of [TRACKER] advisory items to the model
 
 gemini:
   api_key: "${GEMINI_API_KEY}"   # Set via environment variable

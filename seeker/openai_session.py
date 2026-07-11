@@ -43,7 +43,7 @@ from websockets.asyncio.client import ClientConnection
 
 from seeker.brain import ToolHandler
 from seeker.config import OpenAIConfig
-from seeker.position_tracker import PositionTracker
+from seeker.position_tracker import PositionTracker, detect_repeat_cue
 
 log = logging.getLogger(__name__)
 logging.getLogger("websockets").setLevel(logging.WARNING)
@@ -144,6 +144,7 @@ class OpenAIRealtimeSession:
         self._boundary_tick = False
         self._last_commit_at = 0.0
         self._last_tick_at = 0.0
+        self._last_hint_at = 0.0
         self._session_started_at = 0.0
         self._handled_call_ids: set[str] = set()
 
@@ -557,35 +558,94 @@ class OpenAIRealtimeSession:
     async def _on_transcript(self, transcript: str) -> None:
         if self.tracker is None:
             return
-        self.tracker.feed(transcript)
 
+        # Spoken leader cues ("one more time!") precede ad-lib repeats that no
+        # arrangement predicts — warn the model and make it think now.
+        cue = detect_repeat_cue(transcript) if self.mode == "song" else None
+
+        self.tracker.feed(transcript)
         proposal = self.tracker.propose()
+
         if (
             proposal is not None
             and self.mode == "song"
             and self.config.tracker_autofire
             and proposal.confidence >= self.config.tracker_autofire_confidence
+            and proposal.margin >= self.config.tracker_autofire_margin
         ):
-            # Verbatim lyric evidence: fire without waiting for a tick. The
-            # handler still applies every evaluate_trigger guard.
+            # Verbatim lyric evidence with a clear win over every rival
+            # hypothesis (including repeats and off-plan jumps): fire without
+            # waiting for a tick. The handler still applies every
+            # evaluate_trigger guard.
             result = await self.tool_handler.handle(
                 TOOL_NAME,
-                {"next_slide_index": proposal.index, "section_label": "tracker_autofire"},
+                {"next_slide_index": proposal.index, "section_label": proposal.reason},
             )
             if result.get("ok"):
                 self.stats["tracker_fires"] += 1
-                self._record_slide(proposal.index, source="tracker")
+                self._record_slide(proposal.index, source=f"tracker:{proposal.reason}")
                 await self._post_state_item(self._slide_state_text)
             return
 
-        if proposal is not None or self.tracker.near_boundary():
-            # Plausible-but-ambiguous: make the model think NOW.
+        if cue:
+            self._boundary_tick = True
+            await self._post_hint(
+                f"[TRACKER] Leader cue heard: '{cue}'. Expect an ad-lib repeat of the "
+                "current section even if the arrangement moves on — follow the singing."
+            )
+            return
+
+        # Strong-but-ambiguous evidence (near-tie with a twin section or the
+        # current slide → propose() returned None, or a proposal too close to
+        # a rival to autofire): escalate to the model with the shortlist —
+        # it can hear what text cannot show.
+        strong_ambiguity = False
+        if proposal is None and self.mode == "song" and self.tracker.arrangement:
+            movers = [h for h in self.tracker.hypotheses() if h.reason != "current"]
+            strong_ambiguity = bool(movers) and (
+                movers[0].evidence >= self.tracker.propose_threshold
+            )
+
+        if proposal is not None or strong_ambiguity:
+            self._boundary_tick = True
+            await self._post_hint(self._format_hypotheses_hint())
+        elif self.tracker.near_boundary():
             self._boundary_tick = True
 
+    def _format_hypotheses_hint(self) -> str:
+        top = [h for h in self.tracker.hypotheses() if h.evidence > 0.4][:3]
+        if not top:
+            return ""
+        listing = "; ".join(
+            f"slide {h.index}"
+            + (f" '{h.label}'" if h.label else "")
+            + f" ({h.reason}, {h.evidence:.2f})"
+            for h in top
+        )
+        return (
+            f"[TRACKER] The lyrics being sung match more than one slide: {listing}. "
+            "Decide by ear (arrangement order, band cues, which repeat this is)."
+        )
+
+    async def _post_hint(self, text: str) -> None:
+        """Inject a rate-limited advisory item for the model's next decision."""
+        if not text:
+            return
+        now = time.monotonic()
+        if now - self._last_hint_at < self.config.hint_cooldown_s:
+            return
+        self._last_hint_at = now
+        await self._post_state_item(text)
+
     def _record_slide(self, index: int, source: str) -> None:
+        label = ""
         if self.tracker is not None:
             self.tracker.anchor(index)
-        self._slide_state_text = f"[STATE] Slide {index} is now on screen (via {source})."
+            label = self.tracker.label_for(index)
+        label_part = f" ({label})" if label else ""
+        self._slide_state_text = (
+            f"[STATE] Slide {index}{label_part} is now on screen (via {source})."
+        )
 
     def notify_external_slide_change(self, index: int) -> None:
         """A human moved the deck: re-anchor and tell the model to yield."""

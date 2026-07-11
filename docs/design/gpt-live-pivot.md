@@ -116,6 +116,29 @@ Mapping Part II's failure modes onto the new capabilities:
 - **Arbiter** — every fire from every source (model tool call, tracker autofire, human) flows through the unchanged `evaluate_trigger` guards and reconcile loop. The model is *primary* (it hears music, semantics, delivery); the tracker is the *inner ear* (verbatim lyric confirmation + tick pacing); the operator is *sovereign*.
 - **Three clocks, one seam** — `turn_mode: conductor` (ours), `server_vad` (A/B baseline that reproduces the Gemini failure for honest comparison), `full_duplex` (gpt-live: no commits, no ticks; the model pushes tool calls). The daemon cannot tell the difference: all brains emit the same events through the same `RealtimeBrain` protocol.
 
+### The arrangement is a prior, not a path
+
+Real services break written arrangements constantly: the leader repeats the chorus or bridge "one more time," cuts a verse, tags the ending, or the arrangement sheet is simply wrong. A tracker that walks a fixed expanded path goes blind at exactly those moments — so the tracker does not walk a path; it weighs **hypotheses**.
+
+On every transcript update the tracker scores the tail against a full candidate set, each with a structural prior:
+
+| Hypothesis | Meaning | Prior |
+|---|---|---|
+| `current` | still inside the on-screen slide (never proposed; rivals must beat it) | 1.00 |
+| `arrangement_next` | the planned next slide | 1.00 |
+| `repeat_section` | first slide of the section just sung ("one more time") | 0.92 |
+| `section_jump` | first slide of any other section (wrong arrangement, called jumps, tags) | 0.80 |
+
+Score = lexical evidence × prior. The tracker **autofires only on a clear win**: evidence ≥ 0.9 *and* a score margin ≥ 0.08 over every rival. The margin rule has a beautiful property for twin sections with identical words (Chorus 1 / Chorus 2, the classic killer): when one twin is arrangement-consistent, the prior separates them and the plan wins; when priors tie, the margin is zero and the tracker *refuses to guess* — it escalates to the model with the scored shortlist as a `[TRACKER]` hint ("lyrics match slide 4 'Chorus 1' (0.91) and slide 9 'Chorus 2' (0.91) — decide by ear"), because which repeat you're in is audible (band energy, key change, stripped-down turnaround) even when it isn't textual.
+
+Three more layers close the loop:
+
+- **Spoken cues.** "One more time!", "sing it again", "last time" almost always precede an ad-lib repeat. The transcript-side cue detector triggers an immediate decision tick plus a hint telling the model to expect the current section again — advance warning no arrangement can give. (The model also hears these cues natively; the hint makes them load-bearing.)
+- **Self-healing anchoring.** `anchor()` prefers the upcoming occurrence of a fired slide but falls back to the nearest anywhere, so off-plan fires (from the model, tracker, or operator) re-position the plan pointer instead of derailing it; after the arrangement is exhausted, repeat and jump hypotheses keep tracking through tag endings indefinitely.
+- **Prompt policy.** The worship prompt now states outright: the arrangement is a plan, the singing is the truth; repeats are normal; musical repeat cues (unresolved endings, drum turnarounds, key changes) predict them; never refuse a slide because "the arrangement says otherwise."
+
+Division of labor at the moment of an ad-lib: the tracker catches verbatim, unambiguous re-entries instantly; the model resolves everything delivery-dependent; the operator remains sovereign; and content in the deck that matches nothing stays a HOLD. A missing-from-deck section (leader sings something with no slide) scores low everywhere and correctly holds the current slide.
+
 ### Ideas considered and where they landed
 
 - **Tracker-only cascade (no realtime model)** — cheapest, most deterministic; but sermons are wall-to-wall paraphrase and songs still need judgment (ad-libbed repeats, "sing it again", spoken interludes). *Landed as:* the tracker is fused, not sovereign; it autofires only unambiguous verbatim entries in song mode and otherwise just paces ticks.

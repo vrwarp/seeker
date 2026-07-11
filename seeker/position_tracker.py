@@ -6,12 +6,15 @@ continuously, independent of turn segmentation) and maintains a cheap,
 debuggable estimate of where the service is in the reference text:
 
   * In **song mode** the slides are verbatim lyrics and the arrangement gives
-    the expected performance order (including chorus repeats), so lexical
-    matching is strong evidence. The tracker expands the arrangement into a
-    linear *path* of slide indices, scores the transcript tail against nearby
-    path entries, and can (a) tell the decision loop that a boundary is
-    imminent — the moment to make the model think — and (b) propose the next
-    slide directly when the singers are unambiguously into it.
+    the *expected* performance order — a prior, not a guarantee. Leaders
+    repeat choruses and bridges on a whim ("one more time!") and written
+    arrangements are sometimes wrong, so the tracker scores the transcript
+    tail against a full candidate set (arrangement-next, repeat of the
+    current section, every other section start) with structural priors. It
+    can (a) tell the decision loop a boundary is imminent — the moment to
+    make the model think, (b) propose a slide directly when one candidate
+    wins by a clear margin, and (c) surface its scored hypotheses so
+    ambiguous cases escalate to the model *with* the shortlist.
   * In **sermon mode** (no arrangement) content is paraphrased, so lexical
     evidence is weak; the tracker is used only for tick pacing, never for
     autonomous fires.
@@ -78,13 +81,42 @@ def _entry_score(tail: list[str], opening: list[str], min_k: int) -> float:
     return best
 
 
+# Spoken cues that reliably precede an ad-lib repeat of the current section.
+# Kept deliberately narrow — a false positive only costs one decision tick.
+_REPEAT_CUE_RE = re.compile(
+    r"\b(one more time|sing (?:that|it) again|let's sing (?:that|it) again|"
+    r"do it again|one more|last time)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_repeat_cue(text: str) -> str | None:
+    """Return the matched leader cue ("one more time", …) if *text* contains one."""
+    m = _REPEAT_CUE_RE.search(text)
+    return m.group(0).lower() if m else None
+
+
+@dataclass(frozen=True)
+class Hypothesis:
+    """One scored explanation of what the singers are currently singing."""
+
+    index: int
+    label: str
+    reason: str  # "current" | "arrangement_next" | "repeat_section" | "section_jump"
+    evidence: float  # raw lexical evidence in [0, 1]
+    prior: float  # structural plausibility weight
+    score: float  # evidence * prior
+
+
 @dataclass(frozen=True)
 class TrackerProposal:
     """A tracker-initiated slide proposal (song mode only)."""
 
     index: int
-    confidence: float
-    reason: str  # "entered_next_block" | "finishing_current_block"
+    confidence: float  # raw lexical evidence for the proposed slide
+    reason: str  # hypothesis reason that won
+    margin: float = 1.0  # score gap over the best rival hypothesis
+    label: str = ""
 
 
 @dataclass
@@ -104,9 +136,29 @@ class PositionTracker:
     # Minimum transcript tokens heard inside a block before proposing the next.
     min_evidence_tokens: int = 4
 
+    # Structural priors: how plausible each transition is before hearing a
+    # word. The arrangement's next slide is the plan; repeating the section
+    # just sung is the most common ad-lib; any other section start covers a
+    # wrong arrangement or a called jump ("go to the bridge").
+    PRIOR_CONTINUE = 1.0
+    PRIOR_REPEAT = 0.92
+    PRIOR_JUMP = 0.80
+
     def __post_init__(self) -> None:
         self._block_tokens: dict[int, list[str]] = {
             idx: _tokens(text) for idx, text, _ in self.blocks
+        }
+        self._labels: dict[int, str] = {idx: label for idx, _, label in self.blocks}
+        # Consecutive blocks sharing a label form a section; each section's
+        # first slide is a candidate jump/repeat target.
+        self._sections: list[tuple[str, list[int]]] = []
+        for idx, _, label in self.blocks:
+            if self._sections and self._sections[-1][0] == label:
+                self._sections[-1][1].append(idx)
+            else:
+                self._sections.append((label, [idx]))
+        self._section_of: dict[int, int] = {
+            idx: s for s, (_, indices) in enumerate(self._sections) for idx in indices
         }
         self._path: list[int] = self._expand_path()
         self._path_pos: int = 0
@@ -213,34 +265,112 @@ class PositionTracker:
         ending = block[-min(len(block), self.tail_tokens // 2) :]
         return _best_window_similarity(self._tail, ending) >= self.boundary_threshold
 
+    def label_for(self, index: int) -> str:
+        """Section label of a slide ("" when unknown)."""
+        return self._labels.get(index, "")
+
+    def hypotheses(self) -> list[Hypothesis]:
+        """Score every plausible explanation of the current transcript tail.
+
+        The arrangement is treated as a *prior*, not a path: worship leaders
+        repeat choruses and bridges on a whim, and the written order is
+        sometimes simply wrong. Candidates, by structural plausibility:
+
+          * current       — still inside the on-screen slide (never proposed;
+                            exists so rivals must beat it)
+          * arrangement_next — the planned next slide
+          * repeat_section — first slide of the section just sung
+                             ("one more time")
+          * section_jump  — first slide of any other section (wrong
+                            arrangement, called jumps, tag endings)
+
+        Sorted by score (evidence × prior), descending.
+        """
+        current = self.current_index
+        candidates: dict[int, tuple[str, float]] = {}
+
+        nxt = self.next_index
+        if nxt is not None and nxt != current:
+            candidates[nxt] = ("arrangement_next", self.PRIOR_CONTINUE)
+
+        if current is not None:
+            sec = self._section_of.get(current)
+            if sec is not None:
+                repeat_start = self._sections[sec][1][0]
+                if repeat_start != current and repeat_start not in candidates:
+                    candidates[repeat_start] = ("repeat_section", self.PRIOR_REPEAT)
+
+        for _, indices in self._sections:
+            start = indices[0]
+            if start != current and start not in candidates:
+                candidates[start] = ("section_jump", self.PRIOR_JUMP)
+
+        scored: list[Hypothesis] = []
+        for index, (reason, prior) in candidates.items():
+            block = self._block_tokens.get(index, [])
+            opening = block[: min(len(block), self.tail_tokens)]
+            evidence = _entry_score(self._tail, opening, self.min_evidence_tokens)
+            scored.append(
+                Hypothesis(
+                    index=index,
+                    label=self.label_for(index),
+                    reason=reason,
+                    evidence=evidence,
+                    prior=prior,
+                    score=evidence * prior,
+                )
+            )
+
+        # The incumbent: how well the on-screen slide still explains the tail.
+        # Uses window similarity (we may be mid-block, not at its opening).
+        if current is not None:
+            evidence = _best_window_similarity(self._tail, self._block_tokens.get(current, []))
+            scored.append(
+                Hypothesis(
+                    index=current,
+                    label=self.label_for(current),
+                    reason="current",
+                    evidence=evidence,
+                    prior=self.PRIOR_CONTINUE,
+                    score=evidence * self.PRIOR_CONTINUE,
+                )
+            )
+
+        scored.sort(key=lambda h: h.score, reverse=True)
+        return scored
+
     def propose(self) -> TrackerProposal | None:
-        """Propose the next slide when the transcript is unambiguously inside it.
+        """Propose a slide when the transcript unambiguously entered one.
 
         Song mode only (requires an arrangement): verbatim lyrics make lexical
-        entry into the next block decisive. Returns None when evidence is weak,
-        ambiguous, or the path is exhausted.
+        entry decisive. The proposal carries its *margin* over the best rival
+        hypothesis (including "we're still on the current slide") so the
+        caller can demand a clear win before firing autonomously — near-ties
+        (identical chorus repeats, twin sections) are the model's call, made
+        by ear.
         """
         if not self.arrangement:
             return None
-        nxt = self.next_index
-        if nxt is None or self._tokens_since_fire < self.min_evidence_tokens:
+        if self._tokens_since_fire < self.min_evidence_tokens:
             return None
 
-        next_block = self._block_tokens.get(nxt, [])
-        opening = next_block[: min(len(next_block), self.tail_tokens)]
-        entered = _entry_score(self._tail, opening, self.min_evidence_tokens)
-        if entered < self.propose_threshold:
+        hyps = self.hypotheses()
+        movers = [h for h in hyps if h.reason != "current"]
+        if not movers:
+            return None
+        top = movers[0]
+        if top.evidence < self.propose_threshold:
             return None
 
-        # Ambiguity guard: if the *current* block explains the tail almost as
-        # well (repeated lines within a section), hold.
-        current = self.current_index
-        current_score = (
-            _best_window_similarity(self._tail, self._block_tokens.get(current, []))
-            if current is not None
-            else 0.0
+        rivals = [h for h in hyps if h.index != top.index]
+        margin = top.score - rivals[0].score if rivals else top.score
+        if margin <= 0:
+            return None  # the on-screen slide (or a twin) explains it as well
+
+        return TrackerProposal(
+            index=top.index,
+            confidence=top.evidence,
+            reason=top.reason,
+            margin=margin,
+            label=top.label,
         )
-        if current_score >= entered - 0.05:
-            return None
-
-        return TrackerProposal(index=nxt, confidence=entered, reason="entered_next_block")

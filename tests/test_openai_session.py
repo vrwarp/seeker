@@ -325,6 +325,82 @@ class TestTrackerFusion:
         assert handler.calls == []
 
     @pytest.mark.asyncio
+    async def test_adlib_jump_back_autofires_when_unambiguous(self):
+        # Arrangement is exhausted (on the Chorus); the leader goes back to
+        # Verse 1 anyway — an off-plan jump the old fixed-path tracker missed.
+        tracker = PositionTracker(blocks=SONG_BLOCKS, arrangement=["Verse 1", "Chorus"])
+        tracker.anchor(1)
+        session, handler, _ = make_session(tracker=tracker, mode="song")
+        await session._dispatch(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "amazing grace how sweet the sound",
+            }
+        )
+        # Verse 1 restarting is the only strong hypothesis → tracker fires it.
+        assert handler.calls and handler.calls[0][1]["next_slide_index"] == 0
+        assert handler.calls[0][1]["section_label"] == "section_jump"
+
+    @pytest.mark.asyncio
+    async def test_repeat_cue_alerts_model_instead_of_firing(self):
+        tracker = PositionTracker(blocks=SONG_BLOCKS, arrangement=["Verse 1", "Chorus"])
+        session, handler, ws = make_session(tracker=tracker, mode="song")
+        await session._dispatch(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "come on church one more time",
+            }
+        )
+        assert handler.calls == []
+        assert session._boundary_tick is True
+        items = [m for m in ws.sent if m["type"] == "conversation.item.create"]
+        assert any("one more time" in i["item"]["content"][0]["text"] for i in items)
+
+    @pytest.mark.asyncio
+    async def test_twin_sections_escalate_with_hypotheses_hint(self):
+        blocks = [
+            (0, "Verse words that are unique here in this line", "Verse 1"),
+            (1, "Sing it out sing it loud forever and ever", "Chorus 1"),
+            (2, "Sing it out sing it loud forever and ever", "Chorus 2"),
+        ]
+        tracker = PositionTracker(
+            blocks=blocks, arrangement=["Verse 1", "Chorus 1", "Chorus 2"]
+        )
+        tracker.anchor(1)
+        tracker.anchor(2)  # on Chorus 2, arrangement exhausted; twins remain
+        session, handler, ws = make_session(tracker=tracker, mode="song")
+        await session._dispatch(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "sing it out sing it loud forever and ever",
+            }
+        )
+        assert handler.calls == []  # lexically undecidable — never guess
+        assert session._boundary_tick is True
+        items = [m for m in ws.sent if m["type"] == "conversation.item.create"]
+        hints = [i for i in items if "[TRACKER]" in i["item"]["content"][0]["text"]]
+        assert hints and "more than one slide" in hints[0]["item"]["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_hints_are_rate_limited(self):
+        tracker = PositionTracker(blocks=SONG_BLOCKS, arrangement=["Verse 1", "Chorus"])
+        session, _, ws = make_session(tracker=tracker, mode="song")
+        for _ in range(3):
+            await session._dispatch(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "one more time",
+                }
+            )
+        hints = [
+            m
+            for m in ws.sent
+            if m["type"] == "conversation.item.create"
+            and "[TRACKER]" in m["item"]["content"][0]["text"]
+        ]
+        assert len(hints) == 1
+
+    @pytest.mark.asyncio
     async def test_operator_override_reanchors_and_informs_model(self):
         tracker = PositionTracker(blocks=SONG_BLOCKS, arrangement=["Verse 1", "Chorus"])
         session, _, ws = make_session(tracker=tracker, mode="song")
