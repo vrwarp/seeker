@@ -1,14 +1,49 @@
 # Seeker — Configuration
 # Copy this file to config.yaml and adjust to your environment.
 
+# Which realtime brain drives the slides.
+#   openai — OpenAI Realtime API, conductor-driven (no VAD in the trigger
+#            path; the fix for continuous worship audio). The default.
+#   gemini — legacy Gemini Live path (server-VAD turn segmentation).
+provider: "openai"
+
 audio:
   device_name: "default"        # Substring match against available input devices
   device_index: null             # Override: set an explicit device index
-  sample_rate: 16000
+  sample_rate: 16000             # Capture rate; resampled to 24 kHz for OpenAI
   channels: 1
   chunk_duration_ms: 32
   queue_max_size: 100
   input_gain_db: 0.0
+
+openai:
+  api_key: "${OPENAI_API_KEY}"   # Set via environment variable
+  # gpt-realtime-2.1 (2026-07-06) is the flagship; gpt-realtime-2.1-mini is
+  # ~5x cheaper on audio-in and a good fit once tracking accuracy is proven.
+  # When gpt-live's API ships, point this at it and set turn_mode: full_duplex.
+  model: "gpt-realtime-2.1"
+  # Streaming input transcription — feeds the deterministic lyric tracker and
+  # lets the server swap audio tokens for text in context (cheaper long runs).
+  transcribe_model: "gpt-realtime-whisper"
+  transcribe_language: "en"
+  transcribe_delay: "low"        # minimal|low|medium|high (whisper model only)
+  # conductor    — Seeker owns the decision clock (today's mode)
+  # server_vad   — API VAD segments turns (A/B baseline; fails on music)
+  # full_duplex  — anticipated gpt-live mode: the model acts on its own
+  turn_mode: "conductor"
+  noise_reduction: "far_field"   # near_field|far_field|"" — board feeds: far_field
+  reasoning_effort: "low"        # decisions must be fast, not deep
+  tick_min_interval_s: 0.9       # fastest allowed decision cadence
+  tick_max_interval_s: 2.5       # slowest allowed decision cadence (with new audio)
+  commit_interval_s: 0.8         # how often buffered audio becomes context
+  min_commit_ms: 160             # never commit slivers (API rejects <100 ms)
+  max_response_tokens: 64        # a decision is a tool call or "HOLD"
+  reconnect_max_backoff_s: 8.0
+  truncation_retention_ratio: 0.8      # cache-friendly server-side truncation
+  post_instructions_token_limit: 8000  # context budget beyond the instructions
+  session_rotate_s: 3000         # rotate ahead of the hard 60-min session cap
+  tracker_autofire: true         # song mode: fire unambiguous verbatim lyric matches
+  tracker_autofire_confidence: 0.9
 
 gemini:
   api_key: "${GEMINI_API_KEY}"   # Set via environment variable

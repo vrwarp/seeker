@@ -59,6 +59,59 @@ class GeminiConfig:
 
 
 @dataclass
+class OpenAIConfig:
+    """OpenAI Realtime API configuration.
+
+    The realtime session runs with server turn detection DISABLED — Seeker owns
+    the decision clock (the "conductor"). ``turn_mode`` exists so the same
+    session class can adopt gpt-live's server-driven full-duplex mode the day
+    its API ships, without another rewrite:
+
+      * ``conductor``   — turn_detection off; Seeker commits audio and requests
+                          a decision on its own cadence (gpt-realtime today).
+      * ``server_vad``  — the API's VAD segments turns (A/B baseline only;
+                          reproduces the Gemini failure mode on music).
+      * ``full_duplex`` — anticipated gpt-live mode: the model decides when to
+                          act, many times per second; no commits, no ticks.
+    """
+
+    api_key: str = ""
+    model: str = "gpt-realtime-2.1"
+    # Streaming input transcription (the perception plane / tracker feed).
+    # gpt-realtime-whisper is natively streaming and supports the `delay` knob.
+    transcribe_model: str = "gpt-realtime-whisper"
+    transcribe_language: str = "en"
+    transcribe_delay: str = "low"  # minimal|low|medium|high (gpt-realtime-whisper only)
+    base_url: str = "wss://api.openai.com/v1/realtime"
+    # Realtime API PCM16 audio is 24 kHz mono; capture audio is resampled if needed.
+    sample_rate: int = 24_000
+    turn_mode: str = "conductor"
+    # Board feeds in a reverberant room benefit from far-field noise reduction.
+    noise_reduction: str = "far_field"  # near_field|far_field|"" (off)
+    # Realtime reasoning effort — decisions must be fast, not deep.
+    reasoning_effort: str = "low"
+    # Conductor cadence: never decide faster than min, never slower than max.
+    tick_min_interval_s: float = 0.9
+    tick_max_interval_s: float = 2.5
+    # How often committed audio becomes conversation items (and transcription).
+    commit_interval_s: float = 0.8
+    # Never commit less than this much audio (the API rejects tiny buffers).
+    min_commit_ms: int = 160
+    # A decision is a tool call or the word HOLD — cap the output accordingly.
+    max_response_tokens: int = 64
+    reconnect_max_backoff_s: float = 8.0
+    # Cache-friendly server-side truncation for 60–120 min services.
+    truncation_retention_ratio: float = 0.8
+    post_instructions_token_limit: int = 8_000
+    # Hard 60-min session cap upstream: rotate proactively before it.
+    session_rotate_s: float = 3_000.0
+    # Song-mode fusion: the lexical tracker may fire verbatim lyric matches
+    # directly (still routed through evaluate_trigger) without waiting a tick.
+    tracker_autofire: bool = True
+    tracker_autofire_confidence: float = 0.9
+
+
+@dataclass
 class ProPresenterConfig:
     """ProPresenter 7 network API configuration."""
 
@@ -109,6 +162,9 @@ class PromptConfig:
 
     template: str = "prompts/v1.0_baseline.txt"
     song_template: str = "prompts/v1.1_worship.txt"
+    # Templates written for the OpenAI conductor regime (tick → tool or HOLD).
+    openai_template: str = "prompts/v2.0_sermon_openai.txt"
+    openai_song_template: str = "prompts/v2.0_worship_openai.txt"
     manuscript: str = ""
     mode: str = "sermon"
     anticipation_seconds: float = 1.0
@@ -119,7 +175,11 @@ class PromptConfig:
 class SeekerConfig:
     """Top-level configuration aggregating all subsystem configs."""
 
+    # Which realtime brain drives the slides: "openai" (the pivot) or the
+    # legacy "gemini" path.
+    provider: str = "openai"
     audio: AudioConfig = field(default_factory=AudioConfig)
+    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     propresenter: ProPresenterConfig = field(default_factory=ProPresenterConfig)
     operator: OperatorConfig = field(default_factory=OperatorConfig)
@@ -158,8 +218,12 @@ def load_config(path: str | Path) -> SeekerConfig:
 
     config = SeekerConfig()
 
+    if isinstance(raw.get("provider"), str):
+        config.provider = raw["provider"].strip().lower()
+
     section_map = {
         "audio": config.audio,
+        "openai": config.openai,
         "gemini": config.gemini,
         "propresenter": config.propresenter,
         "operator": config.operator,

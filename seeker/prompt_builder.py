@@ -57,8 +57,61 @@ SONG_SLIDE_TOOL_DECLARATION: dict[str, Any] = {
 }
 
 
-def get_tool_declaration(mode: str = "sermon") -> dict[str, Any]:
-    """Return the appropriate tool declaration for the given mode."""
+# OpenAI Realtime API tool schema: flat function objects with lowercase
+# JSON-Schema types (vs Gemini's nested declarations with proto-style types).
+OPENAI_SLIDE_TOOL_DECLARATION: dict[str, Any] = {
+    "type": "function",
+    "name": "trigger_presentation_slide",
+    "description": (
+        "Change the live presentation to the given slide. Call this the moment "
+        "the speaker has moved into the content of that slide."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "next_slide_index": {
+                "type": "integer",
+                "description": "The 0-based index of the slide to display.",
+            },
+        },
+        "required": ["next_slide_index"],
+    },
+}
+
+OPENAI_SONG_SLIDE_TOOL_DECLARATION: dict[str, Any] = {
+    "type": "function",
+    "name": "trigger_presentation_slide",
+    "description": (
+        "Change the live lyrics to the given slide. Slides are triggered "
+        "non-linearly to follow the arrangement (e.g. returning to a chorus). "
+        "Fire so the slide is on screen just BEFORE its first line is sung."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "next_slide_index": {
+                "type": "integer",
+                "description": (
+                    "The 0-based index of the target slide, matching the "
+                    "slide_block index in the manuscript."
+                ),
+            },
+            "section_label": {
+                "type": "string",
+                "description": "Section being triggered (e.g. 'Chorus'). For logging only.",
+            },
+        },
+        "required": ["next_slide_index"],
+    },
+}
+
+
+def get_tool_declaration(mode: str = "sermon", provider: str = "gemini") -> dict[str, Any]:
+    """Return the tool declaration for the given mode in the provider's schema."""
+    if provider == "openai":
+        if mode == "song":
+            return OPENAI_SONG_SLIDE_TOOL_DECLARATION
+        return OPENAI_SLIDE_TOOL_DECLARATION
     if mode == "song":
         return SONG_SLIDE_TOOL_DECLARATION
     return SLIDE_TOOL_DECLARATION

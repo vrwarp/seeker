@@ -7,21 +7,19 @@ import base64
 import json
 import logging
 import random
-from typing import Any, Protocol
+from collections.abc import Coroutine
+from typing import Any
 
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from seeker.brain import ToolHandler
 from seeker.config import GeminiConfig
+
+__all__ = ["GeminiSession", "ToolHandler"]
 
 log = logging.getLogger(__name__)
 logging.getLogger("websockets").setLevel(logging.WARNING)
-
-
-class ToolHandler(Protocol):
-    """Protocol for handling Gemini tool calls locally."""
-
-    async def handle(self, name: str, args: dict[str, Any]) -> dict[str, Any]: ...
 
 
 class GeminiSession:
@@ -141,6 +139,13 @@ class GeminiSession:
             log.info("Setup acknowledged by server.")
         else:
             log.warning("Unexpected setup response: %s", response)
+
+    def run_coros(self) -> list[Coroutine[Any, Any, None]]:
+        """Long-running coroutines for the daemon to supervise (brain protocol)."""
+        return [self.stream_audio(), self.receive_messages()]
+
+    def notify_external_slide_change(self, index: int) -> None:
+        """Brain-protocol hook; the Gemini path has no state-injection channel."""
 
     # ------------------------------------------------------------------
     # Audio streaming (egress)
