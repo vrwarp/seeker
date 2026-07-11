@@ -70,6 +70,40 @@ class TestLoadConfig:
         assert config.audio.sample_rate == 16000
 
 
+class TestProviderConfig:
+    def test_default_provider_is_openai(self):
+        from seeker.config import SeekerConfig
+
+        assert SeekerConfig().provider == "openai"
+
+    def test_openai_section_and_provider_load(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("TEST_OPENAI_KEY", "sk-resolved")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                provider: "OpenAI"
+                openai:
+                  api_key: "${TEST_OPENAI_KEY}"
+                  model: "gpt-realtime-2.1-mini"
+                  turn_mode: "conductor"
+                  tick_max_interval_s: 1.5
+            """)
+        )
+        config = load_config(config_file)
+        assert config.provider == "openai"  # normalized
+        assert config.openai.api_key == "sk-resolved"
+        assert config.openai.model == "gpt-realtime-2.1-mini"
+        assert config.openai.tick_max_interval_s == 1.5
+        # Untouched fields keep their defaults.
+        assert config.openai.transcribe_model == "gpt-realtime-whisper"
+        assert config.openai.sample_rate == 24000
+
+    def test_legacy_gemini_provider_selectable(self, tmp_path: Path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text('provider: "gemini"\n')
+        assert load_config(config_file).provider == "gemini"
+
+
 class TestPromptConfig:
     def test_defaults(self):
         config = PromptConfig()

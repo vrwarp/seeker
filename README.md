@@ -1,27 +1,32 @@
 # Seeker
 
-**Automated sermon slide synchronization** using the [Gemini Multimodal Live API](https://ai.google.dev/gemini-api/docs/multimodal-live) and [ProPresenter 7](https://renewedvision.com/propresenter/).
+**Automated worship & sermon slide synchronization** using the [OpenAI Realtime API](https://developers.openai.com/api/docs/guides/realtime) (pivoting to **gpt-live** full duplex when its API ships) and [ProPresenter 7](https://renewedvision.com/propresenter/). The legacy [Gemini Live](https://ai.google.dev/gemini-api/docs/multimodal-live) path remains available via `provider: gemini`.
 
-Seeker listens to a live pastor's audio feed, semantically tracks position within a sermon manuscript, and automatically advances ProPresenter slides — all in under one second of latency.
+Seeker listens to the live board feed, tracks position within a sermon manuscript or a worship song's lyrics + arrangement, and automatically fires ProPresenter slides at the right instant — silently, with a human operator always sovereign.
+
+**Why the OpenAI pivot:** server-VAD turn segmentation (the Gemini interaction model) collapses on continuous worship audio — no silences means no decision points means stalled slides. Seeker now runs the Realtime API with `turn_detection: null` and owns its own decision clock (the *conductor*), with a `turn_mode: full_duplex` seam ready for gpt-live. Full story: [docs/design/gpt-live-pivot.md](docs/design/gpt-live-pivot.md).
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────┐    PCM Audio     ┌──────────────────┐    WSS / Base64     ┌─────────────────────┐
-│  Soundboard  │ ──────────────▶  │  Python Daemon    │ ──────────────────▶ │  Gemini Live API    │
-│  (Aux Send)  │                  │  (asyncio)        │ ◀────────────────── │  (native-audio)     │
-└──────────────┘                  │                   │    Tool Calls       └─────────────────────┘
-                                  │  ┌─────────────┐  │
-                                  │  │ Audio Queue  │  │
-                                  │  └─────────────┘  │
-                                  │                   │
-                                  │  ┌─────────────┐  │    HTTP REST
-                                  │  │ Orchestrator │──│──────────────────▶ ┌─────────────────────┐
-                                  │  └─────────────┘  │                     │  ProPresenter 7     │
-                                  └──────────────────┘                     │  (Network API)      │
-                                                                           └─────────────────────┘
+┌──────────────┐  PCM (resampled  ┌────────────────────┐  WSS: append/commit  ┌──────────────────────┐
+│  Soundboard  │ ───to 24 kHz)──▶ │  Python Daemon      │ ───response.create──▶│  OpenAI Realtime API │
+│  (Aux Send)  │                  │  (asyncio)          │ ◀── tool calls ──────│  gpt-realtime-2.1    │
+└──────────────┘                  │                     │ ◀── transcripts ─────│  (→ gpt-live next)   │
+                                  │  ┌───────────────┐  │                      └──────────────────────┘
+                                  │  │ Conductor      │  │   The daemon owns the decision clock:
+                                  │  │ (decision clock)│  │   no VAD anywhere in the trigger path.
+                                  │  └───────────────┘  │
+                                  │  ┌───────────────┐  │
+                                  │  │ PositionTracker│  │   Lexical inner ear: paces ticks,
+                                  │  └───────────────┘  │   autofires verbatim lyric matches.
+                                  │  ┌───────────────┐  │    HTTP REST
+                                  │  │ Trigger guards │──│──────────────────▶ ┌─────────────────────┐
+                                  │  └───────────────┘  │                     │  ProPresenter 7     │
+                                  └────────────────────┘                     │  (Network API)      │
+                                                                             └─────────────────────┘
 ```
 
 ---
@@ -35,30 +40,40 @@ seeker/
 ├── .gitignore
 ├── config.example.yaml               # Copy → config.yaml to get started
 ├── prompts/
-│   └── v1.0_baseline.txt             # System prompt with 7 behavioral rules
-├── plan/
-│   ├── 00-overview.md                # Architecture overview & phase index
-│   ├── 01-phase-audio-ingestion.md   # Phase 1: Audio capture pipeline
-│   ├── 02-phase-gemini-websocket.md  # Phase 2: Gemini Live API integration
-│   ├── 03-phase-semantic-tracking.md # Phase 3: Prompt engineering & manuscript parsing
-│   ├── 04-phase-propresenter-control.md # Phase 4: ProPresenter REST control
-│   └── 05-phase-reliability-orchestration.md # Phase 5: Reliability & operator UX
+│   ├── v2.0_sermon_openai.txt        # OpenAI conductor regime: tool call or HOLD
+│   ├── v2.0_worship_openai.txt       # Song mode: fire-early policy, arrangement-aware
+│   ├── v1.0_baseline.txt             # Legacy Gemini prompts
+│   ├── v1.1_baseline.txt
+│   └── v1.1_worship.txt
+├── docs/
+│   ├── design/gpt-live-pivot.md      # The pivot design: diagnosis → architecture → gpt-live plan
+│   └── research/                     # Research briefings (see Research section)
+├── plan/                             # Original phase-by-phase build plan (Gemini era)
 ├── seeker/
 │   ├── __init__.py
 │   ├── cli.py                        # CLI: start, devices, test-pp, test-audio, version
 │   ├── config.py                     # Typed dataclasses + YAML loader w/ env var resolution
-│   ├── audio_capture.py              # Phase 1: PyAudio capture → async queue
-│   ├── gemini_session.py             # Phase 2: WSS lifecycle, tool-call dispatch, reconnection
-│   ├── manuscript_parser.py          # Phase 3: Multi-format parser (txt/md/docx/json/yaml) → XML
-│   ├── prompt_builder.py             # Phase 3: Template injection + setup payload builder
-│   ├── propresenter_client.py        # Phase 4: REST triggers + ToolHandler adapter
-│   └── daemon.py                     # Phase 5: TaskGroup orchestrator + operator HTTP server
+│   ├── audio_capture.py              # PyAudio capture → async queue
+│   ├── file_audio.py                 # File-based audio ingestion (ffmpeg) for replay/testing
+│   ├── brain.py                      # RealtimeBrain protocol — the daemon is provider-blind
+│   ├── openai_session.py             # OpenAI Realtime session: conductor clock, tools, rotation
+│   ├── position_tracker.py           # Deterministic lexical tracker (tick pacing + autofire)
+│   ├── gemini_session.py             # Legacy Gemini Live session
+│   ├── manuscript_parser.py          # Multi-format parser (txt/md/docx/json/yaml/xml) → XML
+│   ├── prompt_builder.py             # Template injection + per-provider tool declarations
+│   ├── propresenter_client.py        # REST triggers + ToolHandler adapter
+│   ├── tracking.py                   # Trigger-safety policy (bounds/no-op/locality/yield)
+│   └── daemon.py                     # Orchestrator + operator HTTP server
 └── tests/
     ├── conftest.py                   # Shared fixtures
     ├── test_config.py
+    ├── test_daemon.py
     ├── test_manuscript_parser.py
+    ├── test_openai_session.py
+    ├── test_position_tracker.py
     ├── test_prompt_builder.py
-    └── test_propresenter_client.py
+    ├── test_propresenter_client.py
+    └── test_tracking.py
 ```
 
 ---
@@ -88,8 +103,14 @@ seeker start --manuscript sermon.txt
 ## Example Commands
 
 ```bash
-# Start the daemon with an audio track, an xml manuscript following the v1.1 baseline, and the v1.1 baseline prompt
-seeker --verbose start --audio-file example.mp3 --manuscript sermon.xml --prompt prompts/v1.1_baseline.txt --play-audio --speed 1.0
+# Sermon replay test: OpenAI conductor brain, xml manuscript, audio from file
+seeker --verbose start --audio-file example.mp3 --manuscript sermon.xml --play-audio --speed 1.0
+
+# Live worship set: lyrics pulled from ProPresenter, arrangement from a text file
+seeker --verbose start --mode song --arrangement tests/arrangement_all_my_boast.txt
+
+# Legacy Gemini path (unchanged behavior)
+seeker --verbose start --provider gemini --manuscript sermon.xml --prompt prompts/v1.1_baseline.txt
 ```
 
 ---
@@ -146,7 +167,8 @@ These endpoints can be mapped to an **Elgato Stream Deck** via **Bitfocus Compan
 ## Prerequisites
 
 - Python 3.9+
-- Google Cloud project with Gemini API access (`gemini-2.5-flash-native-audio`)
+- OpenAI API key with Realtime API access (`gpt-realtime-2.1`; Tier 3+ recommended for dense decision cadences)
+- *(legacy path only)* Google Cloud project with Gemini API access (`gemini-2.5-flash-native-audio`)
 - ProPresenter 7.9+ with Network API enabled
 - `portaudio` system library (`brew install portaudio` on macOS)
 - Audio interface providing a dedicated aux/matrix send from the soundboard
@@ -184,10 +206,12 @@ See the [plan/](plan/) directory for the full technical design:
 
 ---
 
-## Research
+## Research & Design
 
+- **[Seeker × GPT-Live: The Full-Duplex Pivot](docs/design/gpt-live-pivot.md)** — the current design: why server-VAD segmentation fails worship audio, the conductor architecture on the OpenAI Realtime API, and the gpt-live upgrade plan.
+- **[OpenAI Realtime API & GPT-Live briefing](docs/research/openai-realtime-and-gpt-live.md)** (2026-07-11) — GPT-Live launch facts and full-duplex claims; GA Realtime API deep-dive (`turn_detection: null` semantics, transcription, tools, session caps, cost math).
 - [State of the Art for a Live-Audio Slide-Driving Agent](docs/research/state-of-the-art-slide-agent.md) — survey of alternative real-time/audio models (OpenAI gpt-realtime, Amazon Nova Sonic, open/self-hostable options), semantic-alignment techniques, voice-agent frameworks, prior art, and presentation-control/drift strategies, with prioritized next experiments for Seeker.
-- [Is Full-Duplex Worth It for Seeker?](docs/research/full-duplex-suitability.md) — suitability analysis of full-duplex speech models for a mostly-silent, tool-firing agent: the half-duplex vs full-duplex distinction, the tool-calling gap, a candidate-model table, and when the verdict would flip.
+- [Is Full-Duplex Worth It for Seeker?](docs/research/full-duplex-suitability.md) — (2026-06-26, **verdict superseded by the GPT-Live launch** — its flip conditions were met; see the pivot design) suitability analysis of full-duplex speech models for a mostly-silent, tool-firing agent: the half-duplex vs full-duplex distinction, the tool-calling gap, a candidate-model table, and when the verdict would flip.
 - [Frontier Design Briefing: Making "Duplex" Actually Work](docs/research/duplex-frontier-design.md) — generative design study of architectures for continuous-listen + sparse silent structured firing (action-channel, frozen-head, per-frame posterior, cascade-as-duplex), with ranked proposals, a staged build plan, and the highest-upside frontier bet.
 
 ---

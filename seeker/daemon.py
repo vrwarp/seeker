@@ -14,9 +14,12 @@ import aiohttp
 from aiohttp import web
 
 from seeker.audio_capture import create_audio_task
+from seeker.brain import RealtimeBrain
 from seeker.config import SeekerConfig
 from seeker.gemini_session import GeminiSession
 from seeker.manuscript_parser import Manuscript, load_manuscript
+from seeker.openai_session import OpenAIRealtimeSession
+from seeker.position_tracker import PositionTracker
 from seeker.prompt_builder import build_system_prompt, get_tool_declaration, load_prompt_template
 from seeker.propresenter_client import ProPresenterClient, ProPresenterToolHandler
 from seeker.tracking import TrackingState
@@ -179,7 +182,7 @@ class SeekerDaemon:
 
         # Subsystem handles (created on activation)
         self._audio_queue: asyncio.Queue[bytes] | None = None
-        self._gemini_session: GeminiSession | None = None
+        self._brain: RealtimeBrain | None = None
         self._http_session: aiohttp.ClientSession | None = None
         self._pp_client: ProPresenterClient | None = None
         self._task_group_tasks: list[asyncio.Task[Any]] = []
@@ -249,6 +252,8 @@ class SeekerDaemon:
                 pres.slide_count,
             )
 
+        provider = self.config.provider
+
         if mode == "song":
             # In song mode, fetch lyrics from ProPresenter
             slides = await self._pp_client.get_presentation_slides()
@@ -260,8 +265,12 @@ class SeekerDaemon:
                 len(slides),
                 manuscript.title,
             )
-            template = load_prompt_template(self.config.prompt.song_template)
-            tool_decl = get_tool_declaration("song")
+            template = load_prompt_template(
+                self.config.prompt.openai_song_template
+                if provider == "openai"
+                else self.config.prompt.song_template
+            )
+            tool_decl = get_tool_declaration("song", provider)
             presentation_uuid = pres.uuid if pres else ""
 
             # Load arrangement
@@ -293,8 +302,12 @@ class SeekerDaemon:
                 raise ValueError("Manuscript path required for sermon mode")
             log.info("Activating with manuscript: %s", manuscript_path)
             manuscript = load_manuscript(manuscript_path)
-            template = load_prompt_template(self.config.prompt.template)
-            tool_decl = get_tool_declaration("sermon")
+            template = load_prompt_template(
+                self.config.prompt.openai_template
+                if provider == "openai"
+                else self.config.prompt.template
+            )
+            tool_decl = get_tool_declaration("sermon", provider)
 
         # Seed shared tracking state. Non-linear jumps (chorus returns, out-of-order
         # scripture) are legitimate in song mode and v1.1 dual-mode manuscripts, so
@@ -329,13 +342,37 @@ class SeekerDaemon:
             allow_nonlinear=allow_nonlinear,
             auto_yield_cooldown_s=self.config.propresenter.auto_yield_cooldown_s,
         )
-        self._gemini_session = GeminiSession(
-            self.config.gemini, self._audio_queue, tool_handler, self.config.audio
-        )
 
-        # Connect to Gemini
-        await self._gemini_session.connect()
-        await self._gemini_session.send_setup(system_prompt, [tool_decl])
+        if provider == "openai":
+            # The deterministic lexical tracker rides along in both modes: it
+            # paces decision ticks, and in song mode may autofire verbatim
+            # lyric matches. Sermon content is paraphrased, so no arrangement
+            # (and therefore no autofire) is wired there.
+            tracker = PositionTracker(
+                blocks=[(b.index, b.content, b.section_label) for b in manuscript.blocks],
+                arrangement=(
+                    [line for line in song_arrangement.splitlines() if line.strip()]
+                    if (mode == "song" and song_arrangement)
+                    else None
+                ),
+            )
+            tracker.anchor(self._tracking.current_index)
+            self._brain = OpenAIRealtimeSession(
+                self.config.openai,
+                self._audio_queue,
+                tool_handler,
+                self.config.audio,
+                tracker=tracker,
+                mode=mode,
+            )
+        else:
+            self._brain = GeminiSession(
+                self.config.gemini, self._audio_queue, tool_handler, self.config.audio
+            )
+
+        log.info("Connecting realtime brain (provider=%s)...", provider)
+        await self._brain.connect()
+        await self._brain.send_setup(system_prompt, [tool_decl])
 
         self.session_start = time.monotonic()
         self.state = DaemonState.STREAMING
@@ -350,8 +387,7 @@ class SeekerDaemon:
 
         tasks = [
             asyncio.create_task(audio_task_coro),
-            asyncio.create_task(self._gemini_session.stream_audio()),
-            asyncio.create_task(self._gemini_session.receive_messages()),
+            *(asyncio.create_task(coro) for coro in self._brain.run_coros()),
             asyncio.create_task(self._reconcile_loop()),
         ]
         try:
@@ -420,24 +456,26 @@ class SeekerDaemon:
                     state.override_at = now
                     state.current_index = observed
                     self.override_count += 1
+                    if self._brain is not None:
+                        self._brain.notify_external_slide_change(observed)
         except asyncio.CancelledError:
             return
 
     async def deactivate(self) -> None:
         """Gracefully stop streaming and return to DORMANT."""
         log.info("Deactivating...")
-        if self._gemini_session:
-            await self._gemini_session.disconnect()
+        if self._brain:
+            await self._brain.disconnect()
         if self._http_session:
             await self._http_session.close()
         self.state = DaemonState.DORMANT
         log.info("Returned to dormant state.")
 
     async def kill(self) -> None:
-        """Emergency stop — sever Gemini connection immediately."""
+        """Emergency stop — sever the model connection immediately."""
         log.warning("KILL SWITCH activated.")
-        if self._gemini_session:
-            await self._gemini_session.disconnect()
+        if self._brain:
+            await self._brain.disconnect()
         if self._http_session:
             await self._http_session.close()
         self.state = DaemonState.KILLED
@@ -459,21 +497,27 @@ class SeekerDaemon:
         )
         last_latency = self.trigger_latencies[-1] if self.trigger_latencies else 0.0
 
-        return {
+        status = {
             "state": self.state.value,
+            "provider": self.config.provider,
             "current_slide_index": self._tracking.current_index,
             "commanded_slide_index": self._tracking.commanded_index,
             "total_slides": self._tracking.total_slides,
             "operator_override": self._tracking.operator_override,
             "override_count": self.override_count,
             "session_duration_s": round(duration, 1),
-            "gemini_connected": self._gemini_session is not None and self._gemini_session._running,
+            "brain_connected": self._brain is not None
+            and getattr(self._brain, "_running", False),
             "propresenter_connected": self._pp_client is not None,
             "audio_queue_depth": self._audio_queue.qsize() if self._audio_queue else 0,
             "last_trigger_latency_ms": round(last_latency, 1),
             "avg_trigger_latency_ms": round(avg_latency, 1),
             "errors_count": self.error_count,
         }
+        brain_stats = getattr(self._brain, "stats", None)
+        if brain_stats:
+            status["brain"] = dict(brain_stats)
+        return status
 
 
 # ------------------------------------------------------------------

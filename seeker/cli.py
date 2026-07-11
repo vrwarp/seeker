@@ -65,6 +65,13 @@ def cmd_start(args: argparse.Namespace) -> None:
         config.prompt.anticipation_seconds = args.anticipation
     if args.arrangement:
         config.prompt.arrangement_pdf = args.arrangement
+    if args.provider:
+        config.provider = args.provider
+    if args.model:
+        if config.provider == "openai":
+            config.openai.model = args.model
+        else:
+            config.gemini.model = args.model
 
     from seeker.daemon import OperatorServer, SeekerDaemon
 
@@ -182,6 +189,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp_start.add_argument("--mode", choices=["sermon", "song"], default="sermon", help="Tracking mode")
     sp_start.add_argument("--anticipation", type=float, default=None, help="Predictive lead time in seconds for song mode")
     sp_start.add_argument("--arrangement", help="Path to arrangement sheet PDF for song structure context")
+    sp_start.add_argument(
+        "--provider",
+        choices=["openai", "gemini"],
+        default=None,
+        help="Realtime brain provider (default: from config; openai)",
+    )
+    sp_start.add_argument(
+        "--model",
+        default=None,
+        help="Override the realtime model id for the active provider",
+    )
 
     # devices
     sub.add_parser("devices", help="List available audio input devices")
