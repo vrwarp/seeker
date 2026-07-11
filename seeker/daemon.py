@@ -348,13 +348,24 @@ class SeekerDaemon:
             # paces decision ticks, and in song mode may autofire verbatim
             # lyric matches. Sermon content is paraphrased, so no arrangement
             # (and therefore no autofire) is wired there.
+            arrangement_lines: list[str] | None = None
+            if mode == "song":
+                if song_arrangement:
+                    arrangement_lines = [
+                        line for line in song_arrangement.splitlines() if line.strip()
+                    ]
+                else:
+                    # No arrangement sheet: deck order is the default plan
+                    # (still just a prior — the tracker handles ad-lib
+                    # repeats and jumps either way).
+                    arrangement_lines = []
+                    for block in manuscript.blocks:
+                        if not arrangement_lines or arrangement_lines[-1] != block.section_label:
+                            arrangement_lines.append(block.section_label)
+                    arrangement_lines = [label for label in arrangement_lines if label]
             tracker = PositionTracker(
                 blocks=[(b.index, b.content, b.section_label) for b in manuscript.blocks],
-                arrangement=(
-                    [line for line in song_arrangement.splitlines() if line.strip()]
-                    if (mode == "song" and song_arrangement)
-                    else None
-                ),
+                arrangement=arrangement_lines or None,
             )
             tracker.anchor(self._tracking.current_index)
             self._brain = OpenAIRealtimeSession(

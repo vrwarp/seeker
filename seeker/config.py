@@ -109,6 +109,12 @@ class OpenAIConfig:
     # directly (still routed through evaluate_trigger) without waiting a tick.
     tracker_autofire: bool = True
     tracker_autofire_confidence: float = 0.9
+    # …but only when it beats every rival hypothesis (repeat vs next vs jump)
+    # by this score margin; near-ties are escalated to the model instead.
+    tracker_autofire_margin: float = 0.08
+    # Minimum spacing between [TRACKER] hint items injected into the model's
+    # context (candidate shortlists, repeat-cue alerts).
+    hint_cooldown_s: float = 4.0
 
 
 @dataclass

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from seeker.position_tracker import PositionTracker
+from seeker.position_tracker import PositionTracker, detect_repeat_cue
 
 # A miniature worship song: two verses and a chorus that repeats.
 BLOCKS = [
@@ -108,6 +108,116 @@ class TestAnchor:
         tracker.anchor(4)
         assert tracker.current_index == 4
         assert tracker.next_index == 5
+
+
+class TestAdLibRepeats:
+    """The arrangement is a prior, not a path: leaders repeat sections at will."""
+
+    def test_unplanned_chorus_repeat_is_proposed_after_arrangement_ends(self):
+        # Arrangement ends on the chorus, but the leader sings it once more.
+        tracker = PositionTracker(blocks=BLOCKS, arrangement=["Verse 1", "Chorus"])
+        for idx in (1, 2, 3):
+            tracker.anchor(idx)  # now on the final chorus slide; path exhausted
+        assert tracker.next_index is None
+
+        tracker.feed("unending love amazing grace")  # chorus ending
+        tracker.feed("my chains are gone I've been set free")  # chorus restarts
+
+        proposal = tracker.propose()
+        assert proposal is not None
+        assert proposal.index == 2  # first slide of the current section, again
+        assert proposal.reason == "repeat_section"
+
+    def test_tag_ending_supports_multiple_repeats(self):
+        tracker = PositionTracker(blocks=BLOCKS, arrangement=["Verse 1", "Chorus"])
+        for idx in (1, 2, 3):
+            tracker.anchor(idx)
+        # First ad-lib repeat.
+        tracker.feed("my chains are gone I've been set free my God my Savior")
+        first = tracker.propose()
+        assert first is not None and first.index == 2
+        tracker.anchor(2)
+        # Continue within the repeated chorus…
+        tracker.feed("and like a flood His mercy reigns")
+        again = tracker.propose()
+        assert again is not None and again.index == 3
+        tracker.anchor(3)
+        # …and the leader calls it one more time.
+        tracker.feed("my chains are gone I've been set free my God my Savior")
+        second = tracker.propose()
+        assert second is not None and second.index == 2
+
+    def test_wrong_arrangement_yields_to_what_is_sung(self):
+        # Deck has a Bridge the arrangement forgot; leader sings it after the
+        # chorus instead of the planned Verse 2.
+        blocks = BLOCKS + [
+            (6, "You break every chain and set the captive free", "Bridge"),
+        ]
+        tracker = PositionTracker(
+            blocks=blocks, arrangement=["Verse 1", "Chorus", "Verse 2"]
+        )
+        for idx in (1, 2, 3):
+            tracker.anchor(idx)
+        assert tracker.next_index == 4  # the (wrong) plan says Verse 2
+
+        tracker.feed("you break every chain and set the captive free")
+
+        proposal = tracker.propose()
+        assert proposal is not None
+        assert proposal.index == 6
+        assert proposal.reason == "section_jump"
+
+    def test_identical_twin_sections_produce_no_autonomous_proposal(self):
+        # Two distinct deck sections with identical words: lexical evidence
+        # cannot pick one, so the tracker must defer (the model decides by ear).
+        blocks = [
+            (0, "Verse words that are unique here", "Verse 1"),
+            (1, "Sing it out sing it loud forever", "Chorus 1"),
+            (2, "Sing it out sing it loud forever", "Chorus 2"),
+        ]
+        tracker = PositionTracker(
+            blocks=blocks, arrangement=["Verse 1", "Chorus 1", "Chorus 2"]
+        )
+        # From the bridge-less verse, both choruses are plausible next stops:
+        # Chorus 1 is arrangement-next, Chorus 2 a jump — the prior separates
+        # them, so the arrangement-consistent twin wins with a usable margin.
+        tracker.feed("sing it out sing it loud forever")
+        proposal = tracker.propose()
+        assert proposal is not None and proposal.index == 1
+
+        # But once priors tie (both are jumps from Chorus 2's end), the twins
+        # are indistinguishable and the tracker holds.
+        tracker.anchor(1)
+        tracker.anchor(2)  # now on Chorus 2, arrangement exhausted
+        tracker.feed("sing it out sing it loud forever")
+        assert tracker.propose() is None
+        movers = [h for h in tracker.hypotheses() if h.reason != "current"]
+        assert movers and movers[0].evidence >= tracker.propose_threshold
+
+    def test_hypotheses_expose_scored_candidates(self):
+        tracker = make_tracker()
+        tracker.feed("my chains are gone I've been set free")
+        hyps = tracker.hypotheses()
+        assert hyps[0].index == 2
+        assert hyps[0].evidence > 0.9
+        reasons = {h.reason for h in hyps}
+        assert "current" in reasons and "section_jump" in reasons
+
+    def test_label_for(self):
+        tracker = make_tracker()
+        assert tracker.label_for(2) == "Chorus"
+        assert tracker.label_for(99) == ""
+
+
+class TestRepeatCue:
+    def test_detects_leader_cues(self):
+        assert detect_repeat_cue("ONE more time, church!") == "one more time"
+        assert detect_repeat_cue("let's sing it again") == "let's sing it again"
+        assert detect_repeat_cue("this is the last time") == "last time"
+
+    def test_ignores_ordinary_lyrics(self):
+        assert detect_repeat_cue("I am born again in Your love") is None
+        assert detect_repeat_cue("my chains are gone") is None
 
 
 class TestBoundary:
